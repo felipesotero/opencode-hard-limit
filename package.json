@@ -1,0 +1,27 @@
+{
+  "name": "opencode-hard-limit",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that hard-stops model calls when a provider's weekly AI quota drops below a configurable percent-remaining threshold.",
+  "type": "module",
+  "main": "quota-hard-stop.js",
+  "exports": {
+    ".": "./quota-hard-stop.js"
+  },
+  "files": [
+    "quota-hard-stop.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "quota",
+    "anthropic",
+    "openai",
+    "rate-limit"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@slkiser/opencode-quota": "*"
+  }
+}
