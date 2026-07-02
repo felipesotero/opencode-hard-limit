@@ -17,7 +17,7 @@ type WeeklyQuotaResult = {
   ok: boolean;
   status: "ok" | "error";
   remaining: number | null;
-  resetAt: string | null;
+  resetAt: string | number | null;
   unlimited: boolean;
   window?: string;
   error?: string;
@@ -107,10 +107,25 @@ function buildBar(remaining: number, minRemaining: number): { filled: string; em
   };
 }
 
-function formatResetCountdown(resetAt: string | null | undefined): string | null {
-  if (!resetAt) return null;
+function formatResetCountdown(resetAt: string | number | null | undefined): string | null {
+  if (resetAt === null || resetAt === undefined || resetAt === "") return null;
 
-  const resetTime = new Date(resetAt).getTime();
+  // resetAt may arrive as an ISO string, an epoch in seconds, or an epoch in
+  // milliseconds. The quota CLI currently returns epoch seconds as a number, so
+  // normalize before constructing a Date. Values below 1e12 are treated as
+  // seconds and scaled to milliseconds; larger numeric values are already ms.
+  let resetTime: number;
+  if (typeof resetAt === "number") {
+    resetTime = resetAt < 1e12 ? resetAt * 1000 : resetAt;
+  } else {
+    const digits = /^\d+$/.test(resetAt.trim());
+    if (digits) {
+      const n = Number(resetAt.trim());
+      resetTime = n < 1e12 ? n * 1000 : n;
+    } else {
+      resetTime = new Date(resetAt).getTime();
+    }
+  }
   if (!Number.isFinite(resetTime)) return null;
 
   const diff = resetTime - Date.now();
