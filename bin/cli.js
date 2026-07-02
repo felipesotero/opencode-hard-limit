@@ -76,6 +76,7 @@ function buildPatch(values) {
   if (values["block-on-error"] !== undefined) patch.blockOnError = values["block-on-error"];
   if (values["cache-ttl"] !== undefined) patch.cacheTtlMs = values["cache-ttl"];
   if (values["timeout"] !== undefined) patch.timeoutMs = values["timeout"];
+  if (values.window !== undefined) patch.window = values.window;
   return patch;
 }
 
@@ -87,6 +88,7 @@ const SHARED_OPTIONS = {
   "block-on-error": { type: "string" },
   "cache-ttl": { type: "string" },
   timeout: { type: "string" },
+  window: { type: "string" },
   install: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 };
@@ -181,10 +183,11 @@ Scope:
   (if omitted, you are asked interactively; global is recommended)
 
 Settings (all optional except threshold for 'set'):
-  --threshold N        weekly % remaining required to allow a call (default ${DEFAULTS.minRemaining})
+  --threshold N        % remaining required to allow a call (default ${DEFAULTS.minRemaining})
   --block-on-error b   block when quota can't be checked: true|false (default ${DEFAULTS.blockOnError})
   --cache-ttl ms       in-memory cache TTL (default ${DEFAULTS.cacheTtlMs})
   --timeout ms         quota CLI timeout (default ${DEFAULTS.timeoutMs})
+  --window w           quota window to track: 5h | Weekly (default ${DEFAULTS.window})
 
 Examples:
   opencode-hard-limit init --global --threshold 30 --install

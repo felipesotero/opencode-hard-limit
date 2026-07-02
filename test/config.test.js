@@ -106,3 +106,60 @@ test("minRemaining clamps to 0..100", () => {
     assert.equal(resolveConfig({ projectDir: proj }).values.minRemaining, 0);
   });
 });
+
+test("window: default is Weekly", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: undefined }, () => {
+    const { values, sources } = resolveConfig({ projectDir: proj });
+    assert.equal(values.window, "Weekly");
+    assert.equal(sources.window, "default");
+  });
+});
+
+test("window: invalid value falls through to Weekly default", () => {
+  const { xdg, proj } = sandbox();
+  const gdir = join(xdg, "opencode", "opencode-hard-limit");
+  mkdirSync(gdir, { recursive: true });
+  writeFileSync(join(gdir, "config.json"), JSON.stringify({ window: "monthly" }));
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: undefined }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.window, "Weekly");
+    assert.equal(r.sources.window, "default");
+  });
+});
+
+test("window: alias normalization (5h, 5, daily -> '5h'; week, 7d -> 'Weekly')", () => {
+  const { xdg, proj } = sandbox();
+  for (const alias of ["5h", "5", "daily", "5H", "DAILY"]) {
+    withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: alias }, () => {
+      assert.equal(resolveConfig({ projectDir: proj }).values.window, "5h", `alias '${alias}' should map to '5h'`);
+    });
+  }
+  for (const alias of ["Weekly", "weekly", "week", "7d", "WEEKLY"]) {
+    withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: alias }, () => {
+      assert.equal(resolveConfig({ projectDir: proj }).values.window, "Weekly", `alias '${alias}' should map to 'Weekly'`);
+    });
+  }
+});
+
+test("window: precedence (env > project > global)", () => {
+  const { xdg, proj } = sandbox();
+  const gdir = join(xdg, "opencode", "opencode-hard-limit");
+  mkdirSync(gdir, { recursive: true });
+  writeFileSync(join(gdir, "config.json"), JSON.stringify({ window: "5h" }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({ window: "Weekly" }));
+
+  // project overrides global
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: undefined }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.window, "Weekly");
+    assert.equal(r.sources.window, "project");
+  });
+
+  // env overrides project
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: "5h" }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.window, "5h");
+    assert.equal(r.sources.window, "env");
+  });
+});

@@ -1,10 +1,11 @@
 // quota-hard-stop.js
 //
-// OpenCode plugin: hard stop model calls when the WEEKLY AI quota for a
-// provider drops below a configurable "percent remaining" threshold.
+// OpenCode plugin: hard stop model calls when the quota for a provider's
+// configured window ('5h' or 'Weekly') drops below a configurable
+// "percent remaining" threshold.
 //
 // It shells out to the `@slkiser/opencode-quota` CLI via lib/quota.js,
-// reads the JSON, filters the `Weekly` window entry, and throws (aborting
+// reads the JSON, filters the configured window entry, and throws (aborting
 // the model call) when the remaining percentage is below the threshold.
 //
 // Configuration is resolved by ./lib/config.js with this precedence:
@@ -14,8 +15,8 @@
 import { readWeekly } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
 
-const cache = new Map(); // quotaProvider -> { at, result, ttl }
-const inflight = new Map(); // quotaProvider -> Promise (dedupe concurrent checks)
+const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
+const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
 const ERROR_TTL_CAP_MS = 10000; // don't pin a transient failure for the full TTL
 
 // Map an OpenCode provider id to a quota CLI provider id.
@@ -29,27 +30,29 @@ export function resolveQuotaProvider(id) {
 }
 
 async function getQuota(provider, cfg) {
-  const cached = cache.get(provider);
+  const quotaWindow = cfg.window || "Weekly";
+  const cacheKey = `${provider}:${quotaWindow}`;
+  const cached = cache.get(cacheKey);
   if (cached && Date.now() - cached.at < cached.ttl) return cached.result;
 
-  let pending = inflight.get(provider);
+  let pending = inflight.get(cacheKey);
   if (!pending) {
-    pending = readWeekly({ provider, timeoutMs: cfg.timeoutMs })
+    pending = readWeekly({ provider, window: quotaWindow, timeoutMs: cfg.timeoutMs })
       .then((result) => {
         // Timestamp AFTER the call returns, so a slow check doesn't shorten
         // the effective TTL. Cache failures for a shorter window.
         const ttl = result.ok
           ? cfg.cacheTtlMs
           : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
-        cache.set(provider, { at: Date.now(), result, ttl });
-        inflight.delete(provider);
+        cache.set(cacheKey, { at: Date.now(), result, ttl });
+        inflight.delete(cacheKey);
         return result;
       })
       .catch((err) => {
-        inflight.delete(provider);
+        inflight.delete(cacheKey);
         throw err;
       });
-    inflight.set(provider, pending);
+    inflight.set(cacheKey, pending);
   }
   return pending;
 }

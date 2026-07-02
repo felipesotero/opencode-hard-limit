@@ -13,6 +13,7 @@ function okRes(weeklyRemaining, extra = {}) {
     remaining: weeklyRemaining,
     resetAt: null,
     unlimited: false,
+    window: "Weekly",
     ...extra,
   };
 }
@@ -63,5 +64,20 @@ test("blocks when provider node missing (fail-safe)", () => {
 
 test("blocks when Weekly window absent (fail-safe)", () => {
   const r = evaluate("anthropic", errRes("no Weekly window entry"), CFG);
+  assert.equal(r.block, true);
+});
+
+test("5h window: allows when 5h remaining >= threshold", () => {
+  const r = evaluate("anthropic", okRes(82, { window: "5h" }), { ...CFG, window: "5h" });
+  assert.equal(r.block, false);
+});
+
+test("5h window: blocks when 5h remaining < threshold", () => {
+  const r = evaluate("anthropic", okRes(20, { window: "5h" }), { ...CFG, window: "5h" });
+  assert.equal(r.block, true);
+});
+
+test("5h window: fail-safe blocks on error when blockOnError=true", () => {
+  const r = evaluate("anthropic", errRes("no 5h window entry"), { ...CFG, window: "5h" });
   assert.equal(r.block, true);
 });

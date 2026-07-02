@@ -19,6 +19,7 @@ type WeeklyQuotaResult = {
   remaining: number | null;
   resetAt: string | null;
   unlimited: boolean;
+  window?: string;
   error?: string;
 };
 
@@ -51,6 +52,16 @@ function safeMinRemaining(projectDir: string): number {
     return clamp(value, 0, 100);
   } catch {
     return 30;
+  }
+}
+
+function safeWindow(projectDir: string): string {
+  try {
+    const cfg = resolveConfig({ projectDir }).values;
+    const w = String(cfg.window ?? "Weekly");
+    return w === "5h" ? "5h" : "Weekly";
+  } catch {
+    return "Weekly";
   }
 }
 
@@ -101,6 +112,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
 
   const theme = props.api.theme.current;
   const minRemaining = safeMinRemaining(props.api.state.path.directory);
+  const quotaWindow = safeWindow(props.api.state.path.directory);
   const [snapshot, setSnapshot] = createSignal<QuotaMap>({});
 
   let inFlight = false;
@@ -116,7 +128,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
           let next: QuotaSnapshot;
 
           try {
-            const result = (await readWeekly({ provider: provider.id, timeoutMs: READ_TIMEOUT_MS })) as WeeklyQuotaResult;
+            const result = (await readWeekly({ provider: provider.id, window: quotaWindow, timeoutMs: READ_TIMEOUT_MS })) as WeeklyQuotaResult;
             next = result.status === "ok" ? normalizeResult(result) : errorSnapshot(result.error ?? "quota unavailable");
           } catch (error) {
             next = errorSnapshot(error instanceof Error ? error.message : "quota unavailable");
@@ -165,7 +177,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
     <box gap={1} flexDirection="column">
       <box flexDirection="row">
         <text fg={theme.text} wrapMode="none">
-          <b>Quota</b>
+          <b>Quota ({quotaWindow})</b>
         </text>
       </box>
 

@@ -185,10 +185,11 @@ no guessing.
 
 | CLI flag | Env var | File key | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `--threshold` | `OPENCODE_QUOTA_MIN_REMAINING` | `minRemaining` | `30` | Minimum weekly `%` remaining to allow a call. `30` blocks once >70% is used. |
+| `--threshold` | `OPENCODE_QUOTA_MIN_REMAINING` | `minRemaining` | `30` | Minimum `%` remaining to allow a call. `30` blocks once >70% is used. |
 | `--block-on-error` | `OPENCODE_QUOTA_BLOCK_ON_ERROR` | `blockOnError` | `true` | Block when quota can't be verified. `false` fails open (allows on error). |
 | `--cache-ttl` | `OPENCODE_QUOTA_CACHE_TTL_MS` | `cacheTtlMs` | `60000` | In-memory cache TTL per provider (ms). |
 | `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max time to wait for the quota CLI (ms). |
+| `--window` | `OPENCODE_QUOTA_WINDOW` | `window` | `Weekly` | Quota window to track: `5h` or `Weekly`. Selects which window the hard-stop plugin and sidebar widget monitor. |
 
 Environment variables are useful for one-off overrides:
 
