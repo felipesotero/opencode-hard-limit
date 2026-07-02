@@ -7,42 +7,26 @@
 // the `Weekly` window entry, and throws (aborting the model call) when the
 // remaining percentage is below the threshold.
 //
-// Config via environment variables:
-//   OPENCODE_QUOTA_MIN_REMAINING   Minimum weekly % remaining to allow a call.
-//                                  Default: 30 (i.e. block once >70% is used).
-//   OPENCODE_QUOTA_BLOCK_ON_ERROR  "1" (default) blocks when the quota cannot
-//                                  be verified (timeout, error, bad JSON, no
-//                                  Weekly window). "0" fails open (allows).
-//   OPENCODE_QUOTA_CACHE_TTL_MS    In-memory cache TTL per provider to avoid
-//                                  spawning the CLI on every turn. Default 60000.
-//   OPENCODE_QUOTA_TIMEOUT_MS      Max time to wait for the CLI. Default 20000.
+// Configuration is resolved by ./lib/config.js with this precedence:
+//   env var > project file > global file > built-in default.
+// See README.md and `opencode-hard-limit --help` for details.
 
 import { execFile } from "node:child_process";
+import { resolveConfig } from "./lib/config.js";
 
-function numberEnv(name, def) {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return def;
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : def;
-}
-
-function boolEnv(name, def) {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return def;
-  return !["0", "false", "no", "off"].includes(raw.trim().toLowerCase());
-}
+const cache = new Map(); // quotaProvider -> { at, result, ttl }
+const inflight = new Map(); // quotaProvider -> Promise (dedupe concurrent checks)
+const ERROR_TTL_CAP_MS = 10000; // don't pin a transient failure for the full TTL
 
 // Map an OpenCode provider id to a quota CLI provider id.
 // Returns null for providers we do not monitor (plugin then no-ops).
-function resolveQuotaProvider(id) {
+export function resolveQuotaProvider(id) {
   if (!id) return null;
   const v = String(id).toLowerCase();
   if (v.includes("anthropic") || v.includes("claude")) return "anthropic";
   if (v.includes("openai") || v.includes("codex")) return "openai";
   return null;
 }
-
-const cache = new Map(); // quotaProvider -> { at, result }
 
 function runQuota(provider, timeoutMs) {
   return new Promise((resolve) => {
@@ -66,16 +50,33 @@ function runQuota(provider, timeoutMs) {
 }
 
 async function getQuota(provider, cfg) {
-  const now = Date.now();
   const cached = cache.get(provider);
-  if (cached && now - cached.at < cfg.cacheTtlMs) return cached.result;
-  const result = await runQuota(provider, cfg.timeoutMs);
-  cache.set(provider, { at: now, result });
-  return result;
+  if (cached && Date.now() - cached.at < cached.ttl) return cached.result;
+
+  let pending = inflight.get(provider);
+  if (!pending) {
+    pending = runQuota(provider, cfg.timeoutMs)
+      .then((result) => {
+        // Timestamp AFTER the call returns, so a slow check doesn't shorten
+        // the effective TTL. Cache failures for a shorter window.
+        const ttl = result.ok
+          ? cfg.cacheTtlMs
+          : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
+        cache.set(provider, { at: Date.now(), result, ttl });
+        inflight.delete(provider);
+        return result;
+      })
+      .catch((err) => {
+        inflight.delete(provider);
+        throw err;
+      });
+    inflight.set(provider, pending);
+  }
+  return pending;
 }
 
 // Decide whether to block. Returns { block: boolean, message: string }.
-function evaluate(quotaProvider, res, cfg) {
+export function evaluate(quotaProvider, res, cfg) {
   if (!res.ok) {
     return { block: cfg.blockOnError, message: `quota check failed (${res.reason})` };
   }
@@ -107,15 +108,10 @@ function evaluate(quotaProvider, res, cfg) {
   return { block: false, message: `weekly quota ${remaining}% remaining` };
 }
 
-export const QuotaHardStopPlugin = async () => {
+export const QuotaHardStopPlugin = async ({ directory } = {}) => {
   return {
     "chat.params": async (input) => {
-      const cfg = {
-        minRemaining: numberEnv("OPENCODE_QUOTA_MIN_REMAINING", 30),
-        blockOnError: boolEnv("OPENCODE_QUOTA_BLOCK_ON_ERROR", true),
-        cacheTtlMs: numberEnv("OPENCODE_QUOTA_CACHE_TTL_MS", 60000),
-        timeoutMs: numberEnv("OPENCODE_QUOTA_TIMEOUT_MS", 20000),
-      };
+      const cfg = resolveConfig({ projectDir: directory }).values;
 
       const providerId =
         input?.provider?.info?.id ??
@@ -131,8 +127,9 @@ export const QuotaHardStopPlugin = async () => {
       if (block) {
         throw new Error(
           `[quota-hard-stop] Blocked ${providerId} (${quotaProvider}): ${message}. ` +
-            `Override with OPENCODE_QUOTA_MIN_REMAINING=<lower> or ` +
-            `OPENCODE_QUOTA_BLOCK_ON_ERROR=0.`,
+            `Raise your budget with: opencode-hard-limit set --threshold <lower> --global ` +
+            `(or OPENCODE_QUOTA_MIN_REMAINING=<lower>). ` +
+            `To allow when quota can't be checked: OPENCODE_QUOTA_BLOCK_ON_ERROR=0.`,
         );
       }
     },

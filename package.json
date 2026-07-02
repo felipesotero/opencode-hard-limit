@@ -1,27 +1,54 @@
 {
   "name": "opencode-hard-limit",
-  "version": "0.1.0",
-  "description": "OpenCode plugin that hard-stops model calls when a provider's weekly AI quota drops below a configurable percent-remaining threshold.",
+  "version": "0.2.0",
+  "description": "OpenCode plugin that hard-stops model calls when a provider's weekly AI quota drops below a configurable percent-remaining threshold. Global or per-project, configurable via CLI or env.",
   "type": "module",
   "main": "quota-hard-stop.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "exports": {
-    ".": "./quota-hard-stop.js"
+    ".": "./quota-hard-stop.js",
+    "./config": "./lib/config.js"
+  },
+  "bin": {
+    "opencode-hard-limit": "bin/cli.js"
   },
   "files": [
     "quota-hard-stop.js",
+    "lib/config.js",
+    "bin/cli.js",
     "README.md",
     "LICENSE"
   ],
+  "engines": {
+    "node": ">=18.3"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",
     "quota",
+    "rate-limit",
     "anthropic",
+    "claude",
     "openai",
-    "rate-limit"
+    "codex"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/felipesotero/opencode-hard-limit.git"
+  },
+  "bugs": {
+    "url": "https://github.com/felipesotero/opencode-hard-limit/issues"
+  },
+  "homepage": "https://github.com/felipesotero/opencode-hard-limit#readme",
   "license": "MIT",
   "peerDependencies": {
-    "@slkiser/opencode-quota": "*"
+    "@slkiser/opencode-quota": ">=3 <4"
+  },
+  "peerDependenciesMeta": {
+    "@slkiser/opencode-quota": {
+      "optional": true
+    }
   }
 }
