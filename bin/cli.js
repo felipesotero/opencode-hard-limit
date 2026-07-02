@@ -139,7 +139,11 @@ function installPlugin() {
         "--external", "@opencode-ai/plugin",
         "--outfile", sidebarJsDest,
       ],
-      { stdio: ["ignore", "ignore", "pipe"] },
+      // NODE_ENV=production makes bun emit the production JSX runtime
+      // (jsx/jsxs from @opentui/solid/jsx-runtime) instead of jsxDEV from
+      // jsx-dev-runtime. The OpenCode host only virtualizes the production
+      // runtime, so a dev-runtime bundle renders nothing in the sidebar.
+      { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, NODE_ENV: "production" } },
     );
     bundleOk = true;
   } catch (err) {
