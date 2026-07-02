@@ -107,6 +107,21 @@ function buildBar(remaining: number, minRemaining: number): { filled: string; em
   };
 }
 
+function formatResetCountdown(resetAt: string | null | undefined): string | null {
+  if (!resetAt) return null;
+
+  const resetTime = new Date(resetAt).getTime();
+  if (!Number.isFinite(resetTime)) return null;
+
+  const diff = resetTime - Date.now();
+  if (diff <= 0) return null;
+
+  const hours = Math.floor(diff / 3_600_000);
+  const minutes = Math.floor((diff % 3_600_000) / 60_000);
+
+  return `Resets in ${hours}h ${minutes}min`;
+}
+
 function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
   void props.sessionID;
 
@@ -207,6 +222,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                 : "quota unavailable";
             const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
             const markerTone = blocked ? theme.error : theme.border;
+            const resetText = formatResetCountdown(state?.resetAt);
 
             return (
               <box gap={0} flexDirection="column">
@@ -235,6 +251,12 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                       </text>
                     </box>
                   </box>
+                ) : null}
+
+                {resetText ? (
+                  <text fg={theme.textMuted} wrapMode="none">
+                    {resetText}
+                  </text>
                 ) : null}
               </box>
             );
