@@ -5,21 +5,21 @@ import { evaluate, resolveQuotaProvider } from "../quota-hard-stop.js";
 
 const CFG = { minRemaining: 30, blockOnError: true, cacheTtlMs: 60000, timeoutMs: 20000 };
 
-function okRes(provider, weeklyRemaining, extra = {}) {
+// Build a normalized ok result as returned by readWeekly().
+function okRes(weeklyRemaining, extra = {}) {
   return {
     ok: true,
-    parsed: {
-      providers: {
-        [provider]: {
-          status: "ok",
-          entries: [
-            { name: "5h", window: "5h", percentRemaining: 95, unlimited: false },
-            { name: "Weekly", window: "Weekly", percentRemaining: weeklyRemaining, unlimited: false, ...extra },
-          ],
-        },
-      },
-    },
+    status: "ok",
+    remaining: weeklyRemaining,
+    resetAt: null,
+    unlimited: false,
+    ...extra,
   };
+}
+
+// Build a normalized error result as returned by readWeekly().
+function errRes(error) {
+  return { ok: false, status: "error", remaining: null, resetAt: null, unlimited: false, error };
 }
 
 test("provider mapping", () => {
@@ -32,39 +32,36 @@ test("provider mapping", () => {
 });
 
 test("allows when weekly remaining >= threshold", () => {
-  const r = evaluate("anthropic", okRes("anthropic", 82), CFG);
+  const r = evaluate("anthropic", okRes(82), CFG);
   assert.equal(r.block, false);
 });
 
 test("blocks when weekly remaining < threshold", () => {
-  const r = evaluate("anthropic", okRes("anthropic", 20), CFG);
+  const r = evaluate("anthropic", okRes(20), CFG);
   assert.equal(r.block, true);
 });
 
 test("unlimited weekly never blocks", () => {
-  const r = evaluate("anthropic", okRes("anthropic", 0, { unlimited: true }), CFG);
+  const r = evaluate("anthropic", okRes(0, { unlimited: true }), CFG);
   assert.equal(r.block, false);
 });
 
 test("fail-safe: blocks on error when blockOnError=true", () => {
-  const r = evaluate("anthropic", { ok: false, reason: "cli-failed" }, CFG);
+  const r = evaluate("anthropic", errRes("cli-failed"), CFG);
   assert.equal(r.block, true);
 });
 
 test("fail-open: allows on error when blockOnError=false", () => {
-  const r = evaluate("anthropic", { ok: false, reason: "cli-failed" }, { ...CFG, blockOnError: false });
+  const r = evaluate("anthropic", errRes("cli-failed"), { ...CFG, blockOnError: false });
   assert.equal(r.block, false);
 });
 
 test("blocks when provider node missing (fail-safe)", () => {
-  const r = evaluate("anthropic", { ok: true, parsed: { providers: {} } }, CFG);
+  const r = evaluate("anthropic", errRes("no provider data in response"), CFG);
   assert.equal(r.block, true);
 });
 
 test("blocks when Weekly window absent (fail-safe)", () => {
-  const res = {
-    ok: true,
-    parsed: { providers: { anthropic: { status: "ok", entries: [{ window: "5h", percentRemaining: 90 }] } } },
-  };
-  assert.equal(evaluate("anthropic", res, CFG).block, true);
+  const r = evaluate("anthropic", errRes("no Weekly window entry"), CFG);
+  assert.equal(r.block, true);
 });

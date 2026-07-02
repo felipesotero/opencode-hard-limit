@@ -1,6 +1,6 @@
 {
   "name": "opencode-hard-limit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenCode plugin that hard-stops model calls when a provider's weekly AI quota drops below a configurable percent-remaining threshold. Global or per-project, configurable via CLI or env.",
   "type": "module",
   "main": "quota-hard-stop.js",
@@ -16,7 +16,9 @@
   },
   "files": [
     "quota-hard-stop.js",
+    "quota-sidebar.tsx",
     "lib/config.js",
+    "lib/quota.js",
     "bin/cli.js",
     "README.md",
     "LICENSE"

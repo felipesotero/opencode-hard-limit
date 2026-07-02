@@ -3,15 +3,15 @@
 // OpenCode plugin: hard stop model calls when the WEEKLY AI quota for a
 // provider drops below a configurable "percent remaining" threshold.
 //
-// It shells out to the `@slkiser/opencode-quota` CLI, reads the JSON, filters
-// the `Weekly` window entry, and throws (aborting the model call) when the
-// remaining percentage is below the threshold.
+// It shells out to the `@slkiser/opencode-quota` CLI via lib/quota.js,
+// reads the JSON, filters the `Weekly` window entry, and throws (aborting
+// the model call) when the remaining percentage is below the threshold.
 //
 // Configuration is resolved by ./lib/config.js with this precedence:
 //   env var > project file > global file > built-in default.
 // See README.md and `opencode-hard-limit --help` for details.
 
-import { execFile } from "node:child_process";
+import { readWeekly } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
 
 const cache = new Map(); // quotaProvider -> { at, result, ttl }
@@ -28,34 +28,13 @@ export function resolveQuotaProvider(id) {
   return null;
 }
 
-function runQuota(provider, timeoutMs) {
-  return new Promise((resolve) => {
-    execFile(
-      "npx",
-      ["-y", "@slkiser/opencode-quota", "show", "--json", "--provider", provider],
-      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err && !stdout) {
-          resolve({ ok: false, reason: `cli-failed: ${err.message}` });
-          return;
-        }
-        try {
-          resolve({ ok: true, parsed: JSON.parse(stdout) });
-        } catch {
-          resolve({ ok: false, reason: "invalid-json" });
-        }
-      },
-    );
-  });
-}
-
 async function getQuota(provider, cfg) {
   const cached = cache.get(provider);
   if (cached && Date.now() - cached.at < cached.ttl) return cached.result;
 
   let pending = inflight.get(provider);
   if (!pending) {
-    pending = runQuota(provider, cfg.timeoutMs)
+    pending = readWeekly({ provider, timeoutMs: cfg.timeoutMs })
       .then((result) => {
         // Timestamp AFTER the call returns, so a slow check doesn't shorten
         // the effective TTL. Cache failures for a shorter window.
@@ -76,27 +55,17 @@ async function getQuota(provider, cfg) {
 }
 
 // Decide whether to block. Returns { block: boolean, message: string }.
-export function evaluate(quotaProvider, res, cfg) {
+// Consumes the normalized result returned by readWeekly() in lib/quota.js.
+// quotaProvider is kept in the signature for backward compatibility.
+export function evaluate(_quotaProvider, res, cfg) {
   if (!res.ok) {
-    return { block: cfg.blockOnError, message: `quota check failed (${res.reason})` };
+    return { block: cfg.blockOnError, message: `quota check failed (${res.error})` };
   }
-  const node = res.parsed?.providers?.[quotaProvider];
-  if (!node) {
-    return { block: cfg.blockOnError, message: "no provider data in response" };
-  }
-  if (node.status !== "ok") {
-    return { block: cfg.blockOnError, message: `provider status: ${node.status}` };
-  }
-  const entries = Array.isArray(node.entries) ? node.entries : [];
-  const weekly = entries.find((e) => e && e.window === "Weekly");
-  if (!weekly) {
-    return { block: cfg.blockOnError, message: "no Weekly window entry" };
-  }
-  if (weekly.unlimited) {
+  if (res.unlimited) {
     return { block: false, message: "weekly quota unlimited" };
   }
-  const remaining = Number(weekly.percentRemaining);
-  if (!Number.isFinite(remaining)) {
+  const remaining = res.remaining;
+  if (remaining === null || !Number.isFinite(Number(remaining))) {
     return { block: cfg.blockOnError, message: "no numeric percentRemaining" };
   }
   if (remaining < cfg.minRemaining) {

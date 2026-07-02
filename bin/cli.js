@@ -6,7 +6,7 @@
 // plugin into OpenCode.
 
 import { createInterface } from "node:readline/promises";
-import { existsSync, mkdirSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,11 @@ const PKG_ROOT = join(HERE, "..");
 function pluginsDir() {
   const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
   return join(base, "opencode", "plugins");
+}
+
+function tuiConfigPath() {
+  const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
+  return join(base, "opencode", "tui.json");
 }
 
 function print(s = "") {
@@ -98,9 +103,53 @@ function parse(argv) {
 function installPlugin() {
   const dest = pluginsDir();
   mkdirSync(join(dest, "lib"), { recursive: true });
+
+  // Server plugin files
   copyFileSync(join(PKG_ROOT, "quota-hard-stop.js"), join(dest, "quota-hard-stop.js"));
   copyFileSync(join(PKG_ROOT, "lib", "config.js"), join(dest, "lib", "config.js"));
-  print(`Installed plugin -> ${join(dest, "quota-hard-stop.js")}`);
+  copyFileSync(join(PKG_ROOT, "lib", "quota.js"), join(dest, "lib", "quota.js"));
+
+  // TUI sidebar widget
+  const sidebarDest = join(dest, "quota-sidebar.tsx");
+  copyFileSync(join(PKG_ROOT, "quota-sidebar.tsx"), sidebarDest);
+
+  // Register TUI widget in tui.json (idempotent, deduplicated)
+  const tuiPath = tuiConfigPath();
+  let tuiData = null;
+  let tuiParseOk = true;
+  if (existsSync(tuiPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(tuiPath, "utf8"));
+      if (!Array.isArray(raw.plugin)) raw.plugin = [];
+      tuiData = raw;
+    } catch {
+      tuiParseOk = false;
+    }
+  } else {
+    tuiData = { $schema: "https://opencode.ai/tui.json", plugin: [] };
+  }
+
+  if (!tuiParseOk) {
+    print(`warning: ${tuiPath} could not be parsed as JSON.`);
+    print(`  Add "${sidebarDest}" to the "plugin" array in that file manually.`);
+  } else {
+    if (!tuiData.plugin.includes(sidebarDest)) {
+      tuiData.plugin.push(sidebarDest);
+    }
+    mkdirSync(dirname(tuiPath), { recursive: true });
+    writeFileSync(tuiPath, JSON.stringify(tuiData, null, 2) + "\n", "utf8");
+  }
+
+  print(`Installed server hard-stop plugin:`);
+  print(`  quota-hard-stop.js -> ${join(dest, "quota-hard-stop.js")}`);
+  print(`  lib/config.js      -> ${join(dest, "lib", "config.js")}`);
+  print(`  lib/quota.js       -> ${join(dest, "lib", "quota.js")}`);
+  print(`  quota-sidebar.tsx  -> ${sidebarDest}`);
+  if (tuiParseOk) {
+    print(`TUI sidebar widget registered in: ${tuiPath}`);
+  }
+  print(``);
+  print(`Restart OpenCode to load the sidebar widget.`);
 }
 
 function showResolved() {
