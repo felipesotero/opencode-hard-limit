@@ -107,23 +107,23 @@ test("minRemaining clamps to 0..100", () => {
   });
 });
 
-test("window: default is Weekly", () => {
+test("window: default is 5h", () => {
   const { xdg, proj } = sandbox();
   withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: undefined }, () => {
     const { values, sources } = resolveConfig({ projectDir: proj });
-    assert.equal(values.window, "Weekly");
+    assert.equal(values.window, "5h");
     assert.equal(sources.window, "default");
   });
 });
 
-test("window: invalid value falls through to Weekly default", () => {
+test("window: invalid value falls through to 5h default", () => {
   const { xdg, proj } = sandbox();
   const gdir = join(xdg, "opencode", "opencode-hard-limit");
   mkdirSync(gdir, { recursive: true });
   writeFileSync(join(gdir, "config.json"), JSON.stringify({ window: "monthly" }));
   withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: undefined }, () => {
     const r = resolveConfig({ projectDir: proj });
-    assert.equal(r.values.window, "Weekly");
+    assert.equal(r.values.window, "5h");
     assert.equal(r.sources.window, "default");
   });
 });
