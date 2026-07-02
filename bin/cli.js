@@ -75,6 +75,7 @@ function buildPatch(values) {
   if (values.threshold !== undefined) patch.minRemaining = values.threshold;
   if (values["min-remaining"] !== undefined) patch.minRemaining = values["min-remaining"];
   if (values["block-on-error"] !== undefined) patch.blockOnError = values["block-on-error"];
+  if (values["block-on-auth-error"] !== undefined) patch.blockOnAuthError = values["block-on-auth-error"];
   if (values["cache-ttl"] !== undefined) patch.cacheTtlMs = values["cache-ttl"];
   if (values["timeout"] !== undefined) patch.timeoutMs = values["timeout"];
   if (values.window !== undefined) patch.window = values.window;
@@ -87,6 +88,7 @@ const SHARED_OPTIONS = {
   threshold: { type: "string" },
   "min-remaining": { type: "string" },
   "block-on-error": { type: "string" },
+  "block-on-auth-error": { type: "string" },
   "cache-ttl": { type: "string" },
   timeout: { type: "string" },
   window: { type: "string" },

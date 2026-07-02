@@ -213,9 +213,8 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
     }));
 
   const hasAnyResult = () => providerStates().some(({ state }) => Boolean(state));
-  const visibleProviders = () => providerStates().filter(({ state }) => state?.status === "ok" || state?.unlimited);
+  const renderableProviders = () => providerStates().filter(({ state }) => Boolean(state));
   const shouldShowChecking = () => !hasAnyResult();
-  const shouldShowUnavailable = () => hasAnyResult() && visibleProviders().length === 0;
 
   return (
     <box gap={1} flexDirection="column">
@@ -230,13 +229,26 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
           <text fg={theme.textMuted} wrapMode="none">
             checking...
           </text>
-        ) : shouldShowUnavailable() ? (
-          <text fg={theme.textMuted} wrapMode="none">
-            quota unavailable
-          </text>
         ) : (
-          visibleProviders().map(({ provider, state }) => {
+          renderableProviders().map(({ provider, state }) => {
             const unlimited = state?.unlimited === true;
+
+            if (state?.status === "error" && !unlimited) {
+              const warnTone = theme.warning ?? theme.error;
+              const rawReason =
+                typeof state?.error === "string" && state.error.trim() ? state.error : "unavailable";
+              const reason = rawReason.length > 40 ? `${rawReason.slice(0, 37)}...` : rawReason;
+              return (
+                <box flexDirection="row">
+                  <text fg={theme.text} wrapMode="none">
+                    <b>{provider.label}</b>
+                  </text>
+                  <text fg={warnTone} wrapMode="none">
+                    {` unavailable (${reason})`}
+                  </text>
+                </box>
+              );
+            }
             const remainingValue = typeof state?.remaining === "number" ? clamp(state.remaining, 0, 100) : null;
             const blocked = typeof remainingValue === "number" && remainingValue <= minRemaining;
             const tone = unlimited

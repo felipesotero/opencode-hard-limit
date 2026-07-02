@@ -107,6 +107,29 @@ test("minRemaining clamps to 0..100", () => {
   });
 });
 
+test("blockOnAuthError default is false", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR: undefined }, () => {
+    const { values, sources } = resolveConfig({ projectDir: proj });
+    assert.equal(values.blockOnAuthError, false);
+    assert.equal(sources.blockOnAuthError, "default");
+  });
+});
+
+test("blockOnAuthError coercion and env override", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR: "1" }, () => {
+    assert.equal(resolveConfig({ projectDir: proj }).values.blockOnAuthError, true);
+  });
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR: "false" }, () => {
+    assert.equal(resolveConfig({ projectDir: proj }).values.blockOnAuthError, false);
+  });
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR: "maybe" }, () => {
+    // invalid -> falls through to default (false)
+    assert.equal(resolveConfig({ projectDir: proj }).values.blockOnAuthError, false);
+  });
+});
+
 test("window: default is 5h", () => {
   const { xdg, proj } = sandbox();
   withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: undefined }, () => {
