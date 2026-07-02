@@ -7,7 +7,7 @@ import { MONITORED_PROVIDERS, readWeekly } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
 
 const PLUGIN_ID = "felipesotero.quota-sidebar";
-const SIDEBAR_ORDER = 150;
+const SIDEBAR_ORDER = 175;
 const POLL_INTERVAL_MS = 60_000;
 const READ_TIMEOUT_MS = 10_000;
 const BAR_WIDTH = 14;

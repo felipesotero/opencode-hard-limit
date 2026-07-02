@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { evaluate, resolveQuotaProvider } from "../quota-hard-stop.js";
+import { evaluate, resolveQuotaProvider } from "../lib/evaluate.js";
 
 const CFG = { minRemaining: 30, blockOnError: true, cacheTtlMs: 60000, timeoutMs: 20000 };
 

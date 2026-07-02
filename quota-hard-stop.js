@@ -14,20 +14,11 @@
 
 import { readWeekly } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
+import { resolveQuotaProvider, evaluate } from "./lib/evaluate.js";
 
 const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
 const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
 const ERROR_TTL_CAP_MS = 10000; // don't pin a transient failure for the full TTL
-
-// Map an OpenCode provider id to a quota CLI provider id.
-// Returns null for providers we do not monitor (plugin then no-ops).
-export function resolveQuotaProvider(id) {
-  if (!id) return null;
-  const v = String(id).toLowerCase();
-  if (v.includes("anthropic") || v.includes("claude")) return "anthropic";
-  if (v.includes("openai") || v.includes("codex")) return "openai";
-  return null;
-}
 
 async function getQuota(provider, cfg) {
   const quotaWindow = cfg.window || "Weekly";
@@ -55,29 +46,6 @@ async function getQuota(provider, cfg) {
     inflight.set(cacheKey, pending);
   }
   return pending;
-}
-
-// Decide whether to block. Returns { block: boolean, message: string }.
-// Consumes the normalized result returned by readWeekly() in lib/quota.js.
-// quotaProvider is kept in the signature for backward compatibility.
-export function evaluate(_quotaProvider, res, cfg) {
-  if (!res.ok) {
-    return { block: cfg.blockOnError, message: `quota check failed (${res.error})` };
-  }
-  if (res.unlimited) {
-    return { block: false, message: "weekly quota unlimited" };
-  }
-  const remaining = res.remaining;
-  if (remaining === null || !Number.isFinite(Number(remaining))) {
-    return { block: cfg.blockOnError, message: "no numeric percentRemaining" };
-  }
-  if (remaining < cfg.minRemaining) {
-    return {
-      block: true,
-      message: `weekly quota ${remaining}% remaining < ${cfg.minRemaining}% threshold`,
-    };
-  }
-  return { block: false, message: `weekly quota ${remaining}% remaining` };
 }
 
 export const QuotaHardStopPlugin = async ({ directory } = {}) => {

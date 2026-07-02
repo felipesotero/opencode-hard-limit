@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { execFileSync } from "node:child_process";
 
 import {
   DEFAULTS,
@@ -106,16 +107,52 @@ function installPlugin() {
   const dest = pluginsDir();
   mkdirSync(join(dest, "lib"), { recursive: true });
 
-  // Server plugin files
+  // Server plugin files (autoloaded by OpenCode from the plugins dir)
   copyFileSync(join(PKG_ROOT, "quota-hard-stop.js"), join(dest, "quota-hard-stop.js"));
   copyFileSync(join(PKG_ROOT, "lib", "config.js"), join(dest, "lib", "config.js"));
   copyFileSync(join(PKG_ROOT, "lib", "quota.js"), join(dest, "lib", "quota.js"));
+  copyFileSync(join(PKG_ROOT, "lib", "evaluate.js"), join(dest, "lib", "evaluate.js"));
 
-  // TUI sidebar widget
-  const sidebarDest = join(dest, "quota-sidebar.tsx");
-  copyFileSync(join(PKG_ROOT, "quota-sidebar.tsx"), sidebarDest);
+  // TUI sidebar widget: build a self-contained ESM bundle so the widget
+  // carries no relative-import dependencies at runtime.
+  const sidebarJsDest = join(dest, "quota-sidebar.js");
+  const sidebarTsxDest = join(dest, "quota-sidebar.tsx");
 
-  // Register TUI widget in tui.json (idempotent, deduplicated)
+  // Locate bun: prefer the known install path, fall back to PATH.
+  const bunCandidate = join(homedir(), ".bun", "bin", "bun");
+  const bunBin = existsSync(bunCandidate) ? bunCandidate : "bun";
+
+  let bundleOk = false;
+  let sidebarRegistered = sidebarJsDest;
+
+  try {
+    execFileSync(
+      bunBin,
+      [
+        "build",
+        join(PKG_ROOT, "quota-sidebar.tsx"),
+        "--format=esm",
+        "--target=bun",
+        "--external", "solid-js",
+        "--external", "@opentui/solid",
+        "--external", "@opentui/core",
+        "--external", "@opencode-ai/plugin",
+        "--outfile", sidebarJsDest,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    bundleOk = true;
+  } catch (err) {
+    const detail = err.stderr ? err.stderr.toString().trim() : err.message;
+    print(`warning: bun bundle failed; falling back to copying quota-sidebar.tsx.`);
+    if (detail) print(`  ${detail}`);
+    copyFileSync(join(PKG_ROOT, "quota-sidebar.tsx"), sidebarTsxDest);
+    sidebarRegistered = sidebarTsxDest;
+  }
+
+  // Register TUI widget in tui.json.
+  // Migration: remove any stale quota-sidebar.tsx or .js entries first,
+  // then push the current path. Preserve $schema and all other entries.
   const tuiPath = tuiConfigPath();
   let tuiData = null;
   let tuiParseOk = true;
@@ -133,20 +170,27 @@ function installPlugin() {
 
   if (!tuiParseOk) {
     print(`warning: ${tuiPath} could not be parsed as JSON.`);
-    print(`  Add "${sidebarDest}" to the "plugin" array in that file manually.`);
+    print(`  Add "${sidebarRegistered}" to the "plugin" array in that file manually.`);
   } else {
-    if (!tuiData.plugin.includes(sidebarDest)) {
-      tuiData.plugin.push(sidebarDest);
-    }
+    // Remove stale entries (handles migration from .tsx to .js and dedupe).
+    tuiData.plugin = tuiData.plugin.filter(
+      (s) => !String(s).endsWith("quota-sidebar.tsx") && !String(s).endsWith("quota-sidebar.js"),
+    );
+    tuiData.plugin.push(sidebarRegistered);
     mkdirSync(dirname(tuiPath), { recursive: true });
     writeFileSync(tuiPath, JSON.stringify(tuiData, null, 2) + "\n", "utf8");
   }
 
   print(`Installed server hard-stop plugin:`);
-  print(`  quota-hard-stop.js -> ${join(dest, "quota-hard-stop.js")}`);
-  print(`  lib/config.js      -> ${join(dest, "lib", "config.js")}`);
-  print(`  lib/quota.js       -> ${join(dest, "lib", "quota.js")}`);
-  print(`  quota-sidebar.tsx  -> ${sidebarDest}`);
+  print(`  quota-hard-stop.js  -> ${join(dest, "quota-hard-stop.js")}`);
+  print(`  lib/config.js       -> ${join(dest, "lib", "config.js")}`);
+  print(`  lib/quota.js        -> ${join(dest, "lib", "quota.js")}`);
+  print(`  lib/evaluate.js     -> ${join(dest, "lib", "evaluate.js")}`);
+  if (bundleOk) {
+    print(`  quota-sidebar.js    -> ${sidebarJsDest} (bundled)`);
+  } else {
+    print(`  quota-sidebar.tsx   -> ${sidebarTsxDest} (tsx fallback)`);
+  }
   if (tuiParseOk) {
     print(`TUI sidebar widget registered in: ${tuiPath}`);
   }

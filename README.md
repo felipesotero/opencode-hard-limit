@@ -72,11 +72,12 @@ node bin/cli.js install
 - **Uninstall:** remove the copied files and the tui.json entry:
   ```sh
   rm ~/.config/opencode/plugins/quota-hard-stop.js
-  rm ~/.config/opencode/plugins/quota-sidebar.tsx
+  rm ~/.config/opencode/plugins/quota-sidebar.js
   rm ~/.config/opencode/plugins/lib/config.js
   rm ~/.config/opencode/plugins/lib/quota.js
+  rm ~/.config/opencode/plugins/lib/evaluate.js
   ```
-  Then remove the `quota-sidebar.tsx` entry from
+  Then remove the `quota-sidebar.js` entry from
   `~/.config/opencode/tui.json` and restart OpenCode.
 
 > Runtime note: at check time the plugin runs
@@ -88,23 +89,25 @@ node bin/cli.js install
 ## Sidebar quota indicator (TUI)
 
 The package includes `quota-sidebar.tsx`, a SolidJS TUI plugin for OpenCode's
-sidebar that shows a live per-provider weekly usage bar for every monitored
+sidebar that shows a live per-provider usage bar for every monitored
 provider (Claude/Anthropic and Codex/OpenAI).
 
 **What it shows:**
 
-- A usage bar for each provider with the weekly percent remaining.
+- A usage bar for each provider with the percent remaining for the configured
+  quota window.
 - Your configured threshold so you can see how close you are.
 - Color shifts from green (plenty left) to red as remaining usage nears the
   threshold.
 
 **Installation (automatic):**
 
-`opencode-hard-limit install` (and `init --install`) now also copies
-`quota-sidebar.tsx` and `lib/quota.js` into
-`~/.config/opencode/plugins/` and registers the widget in
-`~/.config/opencode/tui.json` under the `"plugin"` array. Restart OpenCode
-after install for the sidebar widget to appear.
+`opencode-hard-limit install` (and `init --install`) bundles
+`quota-sidebar.tsx` into a self-contained `quota-sidebar.js` using bun, copies
+it to `~/.config/opencode/plugins/`, and registers the path in
+`~/.config/opencode/tui.json` under the `"plugin"` array. If bun is not
+available it falls back to copying the `.tsx` source. Restart OpenCode after
+install for the sidebar widget to appear.
 
 **Manual alternative:**
 
@@ -115,7 +118,7 @@ your `~/.config/opencode/tui.json`:
 {
   "$schema": "https://opencode.ai/tui.json",
   "plugin": [
-    "/home/<you>/.config/opencode/plugins/quota-sidebar.tsx"
+    "/home/<you>/.config/opencode/plugins/quota-sidebar.js"
   ]
 }
 ```
@@ -124,20 +127,19 @@ A restart of OpenCode is required after editing `tui.json`.
 
 **Configuration:**
 
-The sidebar reads the same threshold as the hard-stop plugin, using the same
-precedence (`env var > project file > global file > default`). No extra config
-is needed.
+The sidebar reads the same threshold and window as the hard-stop plugin, using
+the same precedence (`env var > project file > global file > default`). No
+extra config is needed.
 
 **Uninstall:**
 
-Remove the copied files and the `tui.json` entry:
+Remove the copied file and the `tui.json` entry:
 
 ```sh
-rm ~/.config/opencode/plugins/quota-sidebar.tsx
-rm ~/.config/opencode/plugins/lib/quota.js
+rm ~/.config/opencode/plugins/quota-sidebar.js
 ```
 
-Then remove the `quota-sidebar.tsx` entry from
+Then remove the `quota-sidebar.js` entry from
 `~/.config/opencode/tui.json` and restart OpenCode.
 
 ## Configuration
