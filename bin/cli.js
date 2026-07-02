@@ -6,7 +6,7 @@
 // plugin into OpenCode.
 
 import { createInterface } from "node:readline/promises";
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,51 +113,24 @@ function installPlugin() {
   copyFileSync(join(PKG_ROOT, "lib", "quota.js"), join(dest, "lib", "quota.js"));
   copyFileSync(join(PKG_ROOT, "lib", "evaluate.js"), join(dest, "lib", "evaluate.js"));
 
-  // TUI sidebar widget: build a self-contained ESM bundle so the widget
-  // carries no relative-import dependencies at runtime.
-  const sidebarJsDest = join(dest, "quota-sidebar.js");
+  // TUI sidebar widget: copy the raw .tsx source.
+  // OpenCode's host transpiles .tsx with babel-preset-solid and virtualizes
+  // @opentui/solid, @opentui/core, and solid-js at the package level, which
+  // is the only supported path. Pre-bundling is NOT used here because bun
+  // emits `from "@opentui/solid/jsx-runtime"` (a subpath specifier that
+  // OpenCode does not virtualize), which would put JSX on a separate solid-js
+  // instance from the virtualized createSignal and cause the widget to render
+  // nothing silently.
   const sidebarTsxDest = join(dest, "quota-sidebar.tsx");
+  copyFileSync(join(PKG_ROOT, "quota-sidebar.tsx"), sidebarTsxDest);
 
-  // Locate bun: prefer the known install path, fall back to PATH.
-  const bunCandidate = join(homedir(), ".bun", "bin", "bun");
-  const bunBin = existsSync(bunCandidate) ? bunCandidate : "bun";
+  // Remove any stale bundled .js left by a prior install.
+  rmSync(join(dest, "quota-sidebar.js"), { force: true });
 
-  let bundleOk = false;
-  let sidebarRegistered = sidebarJsDest;
-
-  try {
-    execFileSync(
-      bunBin,
-      [
-        "build",
-        join(PKG_ROOT, "quota-sidebar.tsx"),
-        "--format=esm",
-        "--target=bun",
-        "--external", "solid-js",
-        "--external", "@opentui/solid",
-        "--external", "@opentui/core",
-        "--external", "@opencode-ai/plugin",
-        "--outfile", sidebarJsDest,
-      ],
-      // NODE_ENV=production makes bun emit the production JSX runtime
-      // (jsx/jsxs from @opentui/solid/jsx-runtime) instead of jsxDEV from
-      // jsx-dev-runtime. The OpenCode host only virtualizes the production
-      // runtime, so a dev-runtime bundle renders nothing in the sidebar.
-      { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, NODE_ENV: "production" } },
-    );
-    bundleOk = true;
-  } catch (err) {
-    const detail = err.stderr ? err.stderr.toString().trim() : err.message;
-    print(`warning: bun bundle failed; falling back to copying quota-sidebar.tsx.`);
-    if (detail) print(`  ${detail}`);
-    copyFileSync(join(PKG_ROOT, "quota-sidebar.tsx"), sidebarTsxDest);
-    sidebarRegistered = sidebarTsxDest;
-  }
-
-  // Register TUI widget in tui.json.
-  // Migration: remove any stale quota-sidebar.tsx or .js entries first,
-  // then push the current path. Preserve $schema and all other entries.
+  // tui.json: remove stale entries (.tsx and .js), push the .tsx path.
+  // Preserves $schema and all other plugin entries.
   const tuiPath = tuiConfigPath();
+  const configDir = dirname(tuiPath); // ~/.config/opencode (XDG-aware)
   let tuiData = null;
   let tuiParseOk = true;
   if (existsSync(tuiPath)) {
@@ -174,15 +147,58 @@ function installPlugin() {
 
   if (!tuiParseOk) {
     print(`warning: ${tuiPath} could not be parsed as JSON.`);
-    print(`  Add "${sidebarRegistered}" to the "plugin" array in that file manually.`);
+    print(`  Add "${sidebarTsxDest}" to the "plugin" array in that file manually.`);
   } else {
-    // Remove stale entries (handles migration from .tsx to .js and dedupe).
+    // Remove stale entries (migration from prior .js and dedupe).
     tuiData.plugin = tuiData.plugin.filter(
       (s) => !String(s).endsWith("quota-sidebar.tsx") && !String(s).endsWith("quota-sidebar.js"),
     );
-    tuiData.plugin.push(sidebarRegistered);
-    mkdirSync(dirname(tuiPath), { recursive: true });
+    tuiData.plugin.push(sidebarTsxDest);
+    mkdirSync(configDir, { recursive: true });
     writeFileSync(tuiPath, JSON.stringify(tuiData, null, 2) + "\n", "utf8");
+  }
+
+  // Ensure TUI runtime deps are installed in the config dir so that
+  // OpenCode's module resolution finds them when it transpiles the widget.
+  const pkgJsonPath = join(configDir, "package.json");
+  let pkgJson = { dependencies: {} };
+  if (existsSync(pkgJsonPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+      pkgJson = parsed;
+      if (!pkgJson.dependencies || typeof pkgJson.dependencies !== "object") {
+        pkgJson.dependencies = {};
+      }
+    } catch {
+      pkgJson = { dependencies: {} };
+    }
+  }
+
+  const REQUIRED_DEPS = ["@opentui/solid", "@opentui/core", "solid-js"];
+  let pkgChanged = false;
+  for (const dep of REQUIRED_DEPS) {
+    if (!pkgJson.dependencies[dep]) {
+      pkgJson.dependencies[dep] = "*";
+      pkgChanged = true;
+    }
+  }
+  if (pkgChanged) {
+    writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2) + "\n", "utf8");
+  }
+
+  // Run bun install in configDir (best-effort: warn on failure, do not throw).
+  const bunCandidate = join(homedir(), ".bun", "bin", "bun");
+  const bunBin = existsSync(bunCandidate) ? bunCandidate : "bun";
+  try {
+    execFileSync(bunBin, ["install"], {
+      cwd: configDir,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch (err) {
+    const detail = err.stderr ? err.stderr.toString().trim() : err.message;
+    print(`warning: bun install failed in ${configDir}.`);
+    if (detail) print(`  ${detail}`);
+    print(`  To fix manually: cd ${configDir} && bun install`);
   }
 
   print(`Installed server hard-stop plugin:`);
@@ -190,14 +206,11 @@ function installPlugin() {
   print(`  lib/config.js       -> ${join(dest, "lib", "config.js")}`);
   print(`  lib/quota.js        -> ${join(dest, "lib", "quota.js")}`);
   print(`  lib/evaluate.js     -> ${join(dest, "lib", "evaluate.js")}`);
-  if (bundleOk) {
-    print(`  quota-sidebar.js    -> ${sidebarJsDest} (bundled)`);
-  } else {
-    print(`  quota-sidebar.tsx   -> ${sidebarTsxDest} (tsx fallback)`);
-  }
+  print(`  quota-sidebar.tsx   -> ${sidebarTsxDest}`);
   if (tuiParseOk) {
     print(`TUI sidebar widget registered in: ${tuiPath}`);
   }
+  print(`TUI runtime deps ensured in: ${pkgJsonPath}`);
   print(``);
   print(`Restart OpenCode to load the sidebar widget.`);
 }

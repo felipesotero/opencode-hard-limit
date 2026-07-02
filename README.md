@@ -72,12 +72,12 @@ node bin/cli.js install
 - **Uninstall:** remove the copied files and the tui.json entry:
   ```sh
   rm ~/.config/opencode/plugins/quota-hard-stop.js
-  rm ~/.config/opencode/plugins/quota-sidebar.js
+  rm ~/.config/opencode/plugins/quota-sidebar.tsx
   rm ~/.config/opencode/plugins/lib/config.js
   rm ~/.config/opencode/plugins/lib/quota.js
   rm ~/.config/opencode/plugins/lib/evaluate.js
   ```
-  Then remove the `quota-sidebar.js` entry from
+  Then remove the `quota-sidebar.tsx` entry from
   `~/.config/opencode/tui.json` and restart OpenCode.
 
 > Runtime note: at check time the plugin runs
@@ -102,12 +102,20 @@ provider (Claude/Anthropic and Codex/OpenAI).
 
 **Installation (automatic):**
 
-`opencode-hard-limit install` (and `init --install`) bundles
-`quota-sidebar.tsx` into a self-contained `quota-sidebar.js` using bun, copies
-it to `~/.config/opencode/plugins/`, and registers the path in
-`~/.config/opencode/tui.json` under the `"plugin"` array. If bun is not
-available it falls back to copying the `.tsx` source. Restart OpenCode after
-install for the sidebar widget to appear.
+`opencode-hard-limit install` (and `init --install`) copies the raw
+`quota-sidebar.tsx` source into `~/.config/opencode/plugins/`, registers its
+absolute path in `~/.config/opencode/tui.json` under the `"plugin"` array, and
+runs `bun install` in `~/.config/opencode/` to ensure `@opentui/solid`,
+`@opentui/core`, and `solid-js` are available for OpenCode's host transpiler.
+Restart OpenCode after install for the sidebar widget to appear.
+
+Pre-bundling is intentionally NOT used. Bundling emits
+`from "@opentui/solid/jsx-runtime"`, a subpath that OpenCode's module
+virtualization layer does not rewrite. That puts JSX calls on a separate
+solid-js instance from the virtualized `createSignal`, so the widget renders
+nothing silently. Shipping the raw `.tsx` lets OpenCode transpile it with
+babel-preset-solid and virtualize solid-js at the package level, which is the
+only supported path.
 
 **Manual alternative:**
 
@@ -118,11 +126,13 @@ your `~/.config/opencode/tui.json`:
 {
   "$schema": "https://opencode.ai/tui.json",
   "plugin": [
-    "/home/<you>/.config/opencode/plugins/quota-sidebar.js"
+    "/home/<you>/.config/opencode/plugins/quota-sidebar.tsx"
   ]
 }
 ```
 
+Also ensure `@opentui/solid`, `@opentui/core`, and `solid-js` are listed as
+dependencies in `~/.config/opencode/package.json` and run `bun install` there.
 A restart of OpenCode is required after editing `tui.json`.
 
 **Configuration:**
@@ -136,10 +146,10 @@ extra config is needed.
 Remove the copied file and the `tui.json` entry:
 
 ```sh
-rm ~/.config/opencode/plugins/quota-sidebar.js
+rm ~/.config/opencode/plugins/quota-sidebar.tsx
 ```
 
-Then remove the `quota-sidebar.js` entry from
+Then remove the `quota-sidebar.tsx` entry from
 `~/.config/opencode/tui.json` and restart OpenCode.
 
 ## Configuration
