@@ -137,6 +137,10 @@ function formatResetCountdown(resetAt: string | number | null | undefined): stri
   return `Resets in ${hours}h ${minutes}min`;
 }
 
+function hasResetAt(value: QuotaSnapshot | undefined): value is QuotaSnapshot & { resetAt: string | number } {
+  return Boolean(value && value.resetAt !== null && value.resetAt !== undefined && value.resetAt !== "");
+}
+
 function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
   void props.sessionID;
 
@@ -166,10 +170,20 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
 
           if (props.api.lifecycle.signal.aborted) return;
 
-          setSnapshot((current) => ({
-            ...current,
-            [provider.id]: next,
-          }));
+          setSnapshot((current) => {
+            const previous = current[provider.id];
+            const carriedResetAt = next.status === "ok" && (next.resetAt === null || next.resetAt === undefined) && hasResetAt(previous)
+              ? previous.resetAt
+              : next.resetAt;
+
+            return {
+              ...current,
+              [provider.id]: {
+                ...next,
+                resetAt: carriedResetAt,
+              },
+            };
+          });
         }),
       );
     } finally {
