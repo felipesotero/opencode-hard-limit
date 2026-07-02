@@ -215,6 +215,62 @@ function installPlugin() {
   print(`Restart OpenCode to load the sidebar widget.`);
 }
 
+function uninstallPlugin() {
+  const dest = pluginsDir();
+
+  // Remove every file this plugin copies into the OpenCode plugins dir.
+  const removed = [];
+  const targets = [
+    join(dest, "quota-hard-stop.js"),
+    join(dest, "quota-sidebar.tsx"),
+    join(dest, "quota-sidebar.js"), // stale bundle from older versions
+    join(dest, "lib", "config.js"),
+    join(dest, "lib", "quota.js"),
+    join(dest, "lib", "evaluate.js"),
+  ];
+  for (const file of targets) {
+    if (existsSync(file)) {
+      rmSync(file, { force: true });
+      removed.push(file);
+    }
+  }
+
+  // Drop the sidebar entry from tui.json, preserving $schema and other plugins.
+  const tuiPath = tuiConfigPath();
+  let tuiCleaned = false;
+  if (existsSync(tuiPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(tuiPath, "utf8"));
+      if (Array.isArray(raw.plugin)) {
+        const before = raw.plugin.length;
+        raw.plugin = raw.plugin.filter(
+          (s) => !String(s).endsWith("quota-sidebar.tsx") && !String(s).endsWith("quota-sidebar.js"),
+        );
+        if (raw.plugin.length !== before) {
+          writeFileSync(tuiPath, JSON.stringify(raw, null, 2) + "\n", "utf8");
+          tuiCleaned = true;
+        }
+      }
+    } catch {
+      print(`warning: ${tuiPath} could not be parsed; remove the quota-sidebar entry manually.`);
+    }
+  }
+
+  if (removed.length === 0 && !tuiCleaned) {
+    print("Nothing to uninstall. No installed files were found.");
+    return;
+  }
+
+  print("Removed installed plugin files:");
+  for (const file of removed) print(`  ${file}`);
+  if (tuiCleaned) print(`Unregistered the sidebar widget from: ${tuiPath}`);
+  print(``);
+  print("Left untouched: your threshold config and the shared @opentui/solid deps");
+  print("in ~/.config/opencode/ (other plugins may rely on them).");
+  print(``);
+  print("Restart OpenCode to complete removal.");
+}
+
 function showResolved() {
   const { values, sources, paths } = resolveConfig({ projectDir: process.cwd() });
   print("Effective configuration (highest-precedence source wins):");
@@ -237,6 +293,7 @@ Usage:
   opencode-hard-limit set  --threshold N [--global|--project]
   opencode-hard-limit get
   opencode-hard-limit install
+  opencode-hard-limit uninstall
 
 Scope:
   --global    apply to all OpenCode projects (~/.config/opencode/opencode-hard-limit/config.json)
@@ -272,6 +329,11 @@ async function main() {
 
   if (cmd === "install") {
     installPlugin();
+    return;
+  }
+
+  if (cmd === "uninstall") {
+    uninstallPlugin();
     return;
   }
 
