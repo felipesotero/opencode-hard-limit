@@ -4,9 +4,10 @@
 // configured window ('5h' or 'Weekly') drops below a configurable
 // "percent remaining" threshold.
 //
-// It shells out to the `@slkiser/opencode-quota` CLI via lib/quota.js,
-// reads the JSON, filters the configured window entry, and throws (aborting
-// the model call) when the remaining percentage is below the threshold.
+// It reads quota natively via lib/quota.js (Anthropic: local `claude` CLI or
+// the OAuth usage API; OpenAI: OpenCode auth.json + the ChatGPT usage endpoint),
+// filters the configured window entry, and throws (aborting the model call)
+// when the remaining percentage is below the threshold.
 //
 // When quota cannot be read due to an auth/token error the call is allowed
 // by default (blockOnAuthError: false) and a throttled warning toast is shown.
@@ -18,6 +19,7 @@
 import { readWeekly, MONITORED_PROVIDERS } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
 import { resolveQuotaProvider, evaluate } from "./lib/evaluate.js";
+import { ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
 
 const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
 const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
@@ -52,7 +54,25 @@ async function getQuota(provider, cfg) {
   return pending;
 }
 
+/** Extract the human-readable tail after the last ':' in reason, or return fallback. */
+function humanReason(reason, fallback) {
+  const i = reason.lastIndexOf(":");
+  return i >= 0 ? reason.slice(i + 1) : fallback;
+}
+
 export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
+  // Self-heal: ensure deployed sidebar matches the installed npm version.
+  // ensureTuiDeployed never throws — outer try/catch is not needed.
+  const { copied: sidebarUpdated } = ensureTuiDeployed();
+  // Defer cleanupLegacyCopies to avoid racing opencode's plugins-dir autoloader.
+  setTimeout(() => { try { cleanupLegacyCopies(); } catch {} }, 30_000).unref?.();
+  if (sidebarUpdated) {
+    // showToast returns a Promise; use .catch to prevent unhandled rejection.
+    client?.tui?.showToast({
+      body: { message: "hard-limit sidebar updated — restart to refresh", variant: "info" },
+    })?.catch?.(() => {});
+  }
+
   return {
     "chat.params": async (input) => {
       const cfg = resolveConfig({ projectDir: directory }).values;
@@ -80,13 +100,12 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
             `quota data is unreadable (percentRemaining missing). ` +
             `Set OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR=0 to allow calls when quota cannot be read.`;
         } else {
-          const lastColon = reason.lastIndexOf(":");
-          const humanReason = lastColon >= 0 ? reason.slice(lastColon + 1) : reason;
+          const hr = humanReason(reason, reason);
           const isAuth = reason.startsWith("auth-error:");
           blockMsg = isAuth
-            ? `quota could not be read (${humanReason}). ` +
+            ? `quota could not be read (${hr}). ` +
               `Refresh your provider login or set OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR=0 to allow.`
-            : `quota check failed (${humanReason}). ` +
+            : `quota check failed (${hr}). ` +
               `Set OPENCODE_QUOTA_BLOCK_ON_ERROR=0 to allow when quota cannot be checked.`;
         }
         throw new Error(
@@ -106,20 +125,20 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
           try {
             const providerEntry = MONITORED_PROVIDERS.find((p) => p.id === quotaProvider);
             const label = providerEntry?.label ?? quotaProvider;
-            const lastColon = reason.lastIndexOf(":");
-            const humanReason = lastColon >= 0 ? reason.slice(lastColon + 1) : "unreadable";
+            const hr = humanReason(reason, "unreadable");
             let toastMsg;
             if (reason.startsWith("auth-error-allowed:")) {
               toastMsg =
-                `${label} quota unreadable (${humanReason}). ` +
+                `${label} quota unreadable (${hr}). ` +
                 `Allowing call; refresh provider login to restore monitoring.`;
             } else if (reason === "unreadable-allowed") {
               toastMsg = `${label} quota data unreadable. Allowing call.`;
             } else {
               toastMsg =
-                `${label} quota check failed (${humanReason}). Allowing call.`;
+                `${label} quota check failed (${hr}). Allowing call.`;
             }
-            client?.tui?.showToast({ body: { message: toastMsg, variant: "warning" } });
+            // showToast returns a Promise; use .catch to prevent unhandled rejection.
+            client?.tui?.showToast({ body: { message: toastMsg, variant: "warning" } })?.catch?.(() => {});
           } catch {
             // toast failure must not affect model call flow
           }

@@ -6,12 +6,10 @@
 // plugin into OpenCode.
 
 import { createInterface } from "node:readline/promises";
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { execFileSync } from "node:child_process";
 
 import {
   DEFAULTS,
@@ -21,18 +19,17 @@ import {
   projectConfigPath,
 } from "../lib/config.js";
 
+import {
+  configDir,
+  pluginsDir,
+  tuiConfigPath,
+  isSidebarEntry,
+  ensureTuiDeployed,
+  cleanupLegacyCopies,
+} from "../lib/deploy.js";
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, "..");
-
-function pluginsDir() {
-  const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(base, "opencode", "plugins");
-}
-
-function tuiConfigPath() {
-  const base = process.env.XDG_CONFIG_HOME || join(homedir(), ".config");
-  return join(base, "opencode", "tui.json");
-}
 
 function print(s = "") {
   process.stdout.write(s + "\n");
@@ -105,130 +102,106 @@ function parse(argv) {
   });
 }
 
+// Matches "opencode-hard-limit" or any pinned/versioned variant like
+// "opencode-hard-limit@0.8.0" so dedupe and uninstall cover all forms.
+const isOurs = (p) =>
+  p === "opencode-hard-limit" || String(p).startsWith("opencode-hard-limit@");
+
 function installPlugin() {
-  const dest = pluginsDir();
-  mkdirSync(join(dest, "lib"), { recursive: true });
+  // 1. Register the server plugin in opencode.json for native auto-update.
+  //    OpenCode reads this on startup and runs BunProc.install + isOutdated.
+  const ocPath = join(configDir(), "opencode.json");
+  let ocData;
+  let ocParseOk = true;
 
-  // Server plugin files (autoloaded by OpenCode from the plugins dir)
-  copyFileSync(join(PKG_ROOT, "quota-hard-stop.js"), join(dest, "quota-hard-stop.js"));
-  copyFileSync(join(PKG_ROOT, "lib", "config.js"), join(dest, "lib", "config.js"));
-  copyFileSync(join(PKG_ROOT, "lib", "quota.js"), join(dest, "lib", "quota.js"));
-  copyFileSync(join(PKG_ROOT, "lib", "evaluate.js"), join(dest, "lib", "evaluate.js"));
+  if (existsSync(ocPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(ocPath, "utf8"));
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("not an object");
+      ocData = raw;
+      if (!Array.isArray(ocData.plugin)) ocData.plugin = [];
+    } catch {
+      ocParseOk = false;
+    }
+  } else {
+    ocData = { $schema: "https://opencode.ai/config.json", plugin: [] };
+  }
 
-  // TUI sidebar widget: copy the raw .tsx source.
-  // OpenCode's host transpiles .tsx with babel-preset-solid and virtualizes
-  // @opentui/solid, @opentui/core, and solid-js at the package level, which
-  // is the only supported path. Pre-bundling is NOT used here because bun
-  // emits `from "@opentui/solid/jsx-runtime"` (a subpath specifier that
-  // OpenCode does not virtualize), which would put JSX on a separate solid-js
-  // instance from the virtualized createSignal and cause the widget to render
-  // nothing silently.
-  const sidebarTsxDest = join(dest, "quota-sidebar.tsx");
-  copyFileSync(join(PKG_ROOT, "quota-sidebar.tsx"), sidebarTsxDest);
+  if (!ocParseOk) {
+    print(`warning: ${ocPath} could not be parsed as JSON.`);
+    print(`  Add "opencode-hard-limit" to the "plugin" array in that file manually.`);
+  } else {
+    // Dedupe: remove any pinned/versioned variants, then push bare name.
+    ocData.plugin = ocData.plugin.filter((p) => !isOurs(p));
+    ocData.plugin.push("opencode-hard-limit");
+    mkdirSync(configDir(), { recursive: true });
+    writeFileSync(ocPath, JSON.stringify(ocData, null, 2) + "\n", "utf8");
+  }
 
-  // Remove any stale bundled .js left by a prior install.
-  rmSync(join(dest, "quota-sidebar.js"), { force: true });
+  // 2. Remove any legacy server files previously copied into plugins/
+  //    (quota-hard-stop.js, lib/config.js, lib/quota.js, lib/evaluate.js).
+  //    Skip when ocParseOk is false to avoid destroying a working legacy install
+  //    while registration has failed.
+  if (ocParseOk) cleanupLegacyCopies();
 
-  // tui.json: remove stale entries (.tsx and .js), push the .tsx path.
-  // Preserves $schema and all other plugin entries.
+  // 3. Deploy TUI sidebar (atomic, idempotent), update tui.json, ensure deps.
+  const { tuiWarning } = ensureTuiDeployed({ pkgRoot: PKG_ROOT });
+
+  const pDir = pluginsDir();
   const tuiPath = tuiConfigPath();
-  const configDir = dirname(tuiPath); // ~/.config/opencode (XDG-aware)
-  let tuiData = null;
-  let tuiParseOk = true;
-  if (existsSync(tuiPath)) {
-    try {
-      const raw = JSON.parse(readFileSync(tuiPath, "utf8"));
-      if (!Array.isArray(raw.plugin)) raw.plugin = [];
-      tuiData = raw;
-    } catch {
-      tuiParseOk = false;
-    }
-  } else {
-    tuiData = { $schema: "https://opencode.ai/tui.json", plugin: [] };
-  }
+  const pkgJsonPath = join(configDir(), "package.json");
+  const sidebarTsxDest = join(pDir, "quota-sidebar.tsx");
 
-  if (!tuiParseOk) {
-    print(`warning: ${tuiPath} could not be parsed as JSON.`);
-    print(`  Add "${sidebarTsxDest}" to the "plugin" array in that file manually.`);
-  } else {
-    // Remove stale entries (migration from prior .js and dedupe).
-    tuiData.plugin = tuiData.plugin.filter(
-      (s) => !String(s).endsWith("quota-sidebar.tsx") && !String(s).endsWith("quota-sidebar.js"),
-    );
-    tuiData.plugin.push(sidebarTsxDest);
-    mkdirSync(configDir, { recursive: true });
-    writeFileSync(tuiPath, JSON.stringify(tuiData, null, 2) + "\n", "utf8");
+  // 4. Print summary.
+  print(`Server plugin registered for auto-update:`);
+  if (ocParseOk) {
+    print(`  Added "opencode-hard-limit" to ${ocPath}`);
+    print(`  OpenCode will install/update the server plugin automatically on next startup.`);
   }
-
-  // Ensure TUI runtime deps are installed in the config dir so that
-  // OpenCode's module resolution finds them when it transpiles the widget.
-  const pkgJsonPath = join(configDir, "package.json");
-  let pkgJson = { dependencies: {} };
-  if (existsSync(pkgJsonPath)) {
-    try {
-      const parsed = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-      pkgJson = parsed;
-      if (!pkgJson.dependencies || typeof pkgJson.dependencies !== "object") {
-        pkgJson.dependencies = {};
-      }
-    } catch {
-      pkgJson = { dependencies: {} };
-    }
-  }
-
-  const REQUIRED_DEPS = ["@opentui/solid", "@opentui/core", "solid-js"];
-  let pkgChanged = false;
-  for (const dep of REQUIRED_DEPS) {
-    if (!pkgJson.dependencies[dep]) {
-      pkgJson.dependencies[dep] = "*";
-      pkgChanged = true;
-    }
-  }
-  if (pkgChanged) {
-    writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2) + "\n", "utf8");
-  }
-
-  // Run bun install in configDir (best-effort: warn on failure, do not throw).
-  const bunCandidate = join(homedir(), ".bun", "bin", "bun");
-  const bunBin = existsSync(bunCandidate) ? bunCandidate : "bun";
-  try {
-    execFileSync(bunBin, ["install"], {
-      cwd: configDir,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-  } catch (err) {
-    const detail = err.stderr ? err.stderr.toString().trim() : err.message;
-    print(`warning: bun install failed in ${configDir}.`);
-    if (detail) print(`  ${detail}`);
-    print(`  To fix manually: cd ${configDir} && bun install`);
-  }
-
-  print(`Installed server hard-stop plugin:`);
-  print(`  quota-hard-stop.js  -> ${join(dest, "quota-hard-stop.js")}`);
-  print(`  lib/config.js       -> ${join(dest, "lib", "config.js")}`);
-  print(`  lib/quota.js        -> ${join(dest, "lib", "quota.js")}`);
-  print(`  lib/evaluate.js     -> ${join(dest, "lib", "evaluate.js")}`);
-  print(`  quota-sidebar.tsx   -> ${sidebarTsxDest}`);
-  if (tuiParseOk) {
-    print(`TUI sidebar widget registered in: ${tuiPath}`);
-  }
-  print(`TUI runtime deps ensured in: ${pkgJsonPath}`);
   print(``);
-  print(`Restart OpenCode to load the sidebar widget.`);
+  print(`TUI sidebar widget deployed:`);
+  print(`  quota-sidebar.tsx -> ${sidebarTsxDest}`);
+  if (!tuiWarning) {
+    print(`  Registered in ${tuiPath}`);
+  } else {
+    print(`  warning: ${tuiPath} could not be parsed.`);
+    print(`  Add "${sidebarTsxDest}" to the "plugin" array in that file manually.`);
+  }
+  print(`  TUI runtime deps ensured in: ${pkgJsonPath}`);
+  print(``);
+  print(`Restart OpenCode to activate.`);
 }
 
 function uninstallPlugin() {
-  const dest = pluginsDir();
+  const pDir = pluginsDir();
+  const tuiPath = tuiConfigPath();
 
-  // Remove every file this plugin copies into the OpenCode plugins dir.
+  // 1. Remove "opencode-hard-limit" from opencode.json plugin array.
+  const ocPath = join(configDir(), "opencode.json");
+  let ocCleaned = false;
+  if (existsSync(ocPath)) {
+    try {
+      const ocData = JSON.parse(readFileSync(ocPath, "utf8"));
+      if (Array.isArray(ocData.plugin)) {
+        const before = ocData.plugin.length;
+        ocData.plugin = ocData.plugin.filter((p) => !isOurs(p));
+        if (ocData.plugin.length !== before) {
+          writeFileSync(ocPath, JSON.stringify(ocData, null, 2) + "\n", "utf8");
+          ocCleaned = true;
+        }
+      }
+    } catch {
+      print(
+        `warning: ${ocPath} could not be parsed; remove "opencode-hard-limit" from the "plugin" array manually.`,
+      );
+    }
+  }
+
+  // 2. Remove sidebar tsx from plugins/ (and stale .js if present).
   const removed = [];
   const targets = [
-    join(dest, "quota-hard-stop.js"),
-    join(dest, "quota-sidebar.tsx"),
-    join(dest, "quota-sidebar.js"), // stale bundle from older versions
-    join(dest, "lib", "config.js"),
-    join(dest, "lib", "quota.js"),
-    join(dest, "lib", "evaluate.js"),
+    join(pDir, "quota-sidebar.tsx"),
+    join(pDir, "quota-sidebar.js"), // stale bundle from older versions
   ];
   for (const file of targets) {
     if (existsSync(file)) {
@@ -237,17 +210,14 @@ function uninstallPlugin() {
     }
   }
 
-  // Drop the sidebar entry from tui.json, preserving $schema and other plugins.
-  const tuiPath = tuiConfigPath();
+  // 3. Drop the sidebar entry from tui.json, preserving $schema and other plugins.
   let tuiCleaned = false;
   if (existsSync(tuiPath)) {
     try {
       const raw = JSON.parse(readFileSync(tuiPath, "utf8"));
       if (Array.isArray(raw.plugin)) {
         const before = raw.plugin.length;
-        raw.plugin = raw.plugin.filter(
-          (s) => !String(s).endsWith("quota-sidebar.tsx") && !String(s).endsWith("quota-sidebar.js"),
-        );
+        raw.plugin = raw.plugin.filter((s) => !isSidebarEntry(s));
         if (raw.plugin.length !== before) {
           writeFileSync(tuiPath, JSON.stringify(raw, null, 2) + "\n", "utf8");
           tuiCleaned = true;
@@ -258,13 +228,19 @@ function uninstallPlugin() {
     }
   }
 
-  if (removed.length === 0 && !tuiCleaned) {
-    print("Nothing to uninstall. No installed files were found.");
+  // 4. Remove any remaining legacy server copies (guarded by content-signature).
+  cleanupLegacyCopies();
+
+  if (!ocCleaned && removed.length === 0 && !tuiCleaned) {
+    print("Nothing to uninstall. No installed files or registrations were found.");
     return;
   }
 
-  print("Removed installed plugin files:");
-  for (const file of removed) print(`  ${file}`);
+  if (ocCleaned) print(`Unregistered server plugin from: ${ocPath}`);
+  if (removed.length > 0) {
+    print("Removed sidebar files:");
+    for (const file of removed) print(`  ${file}`);
+  }
   if (tuiCleaned) print(`Unregistered the sidebar widget from: ${tuiPath}`);
   print(``);
   print("Left untouched: your threshold config and the shared @opentui/solid deps");

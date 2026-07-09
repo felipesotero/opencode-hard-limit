@@ -235,16 +235,15 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
 
             if (state?.status === "error" && !unlimited) {
               const warnTone = theme.warning ?? theme.error;
-              const rawReason =
+              const reason =
                 typeof state?.error === "string" && state.error.trim() ? state.error : "unavailable";
-              const reason = rawReason.length > 40 ? `${rawReason.slice(0, 37)}...` : rawReason;
               return (
-                <box flexDirection="row">
+                <box flexDirection="column">
                   <text fg={theme.text} wrapMode="none">
                     <b>{provider.label}</b>
                   </text>
-                  <text fg={warnTone} wrapMode="none">
-                    {` unavailable (${reason})`}
+                  <text fg={warnTone} wrapMode="wrap">
+                    {`unavailable (${reason})`}
                   </text>
                 </box>
               );

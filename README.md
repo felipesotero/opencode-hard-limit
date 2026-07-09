@@ -7,9 +7,9 @@ Codex/OpenAI usage and puts a **hard stop** on model calls once you drop below a
 percent-remaining threshold you choose. It also adds a live **sidebar bar** so
 you can see exactly how much you have left and when the window resets.
 
-It builds on [`@slkiser/opencode-quota`](https://github.com/slkiser/opencode-quota),
-which surfaces quota numbers but does **not** block anything. This plugin adds
-the missing enforcement layer.
+It reads your subscription quota **natively** — no external quota plugin
+required — and adds the enforcement layer on top: a hard stop plus a live
+sidebar bar.
 
 ## Why you might want this
 
@@ -28,8 +28,8 @@ reserve.** That is the `threshold`. Everything else has a sensible default.
 
 ## Quick start
 
-One command. It writes your config, installs the plugin, and wires up the
-sidebar:
+One command. It writes your config, registers the plugin for auto-update, and
+wires up the sidebar:
 
 ```sh
 npx opencode-hard-limit init --global --threshold 30 --install
@@ -37,19 +37,50 @@ npx opencode-hard-limit init --global --threshold 30 --install
 
 Then **restart OpenCode**. That is it.
 
-You do **not** need to install `@slkiser/opencode-quota` separately. The plugin
-invokes it on demand via `npx` at check time, so the quota reader is fetched
-automatically the first time it runs (this needs network access on that first
-call).
+`install` does two things:
+
+1. **Registers the server plugin** — writes `"opencode-hard-limit"` into
+   `~/.config/opencode/opencode.json`. OpenCode reads this on every startup and
+   automatically fetches the latest published version via its native package
+   manager, so the hard-stop logic is always up to date without any manual
+   steps.
+
+2. **Deploys the sidebar widget** — copies `quota-sidebar.tsx` into
+   `~/.config/opencode/plugins/` and registers it in `tui.json`. The plugin
+   factory also self-heals the sidebar on every opencode startup: it checks
+   whether the deployed file matches the currently installed npm version and
+   re-copies it if not, so sidebar and server plugin stay in sync automatically.
+
+There is **no external quota dependency**. The plugin reads quota itself:
+for Claude/Anthropic it uses your local `claude` CLI (or the OAuth usage API as
+a fallback), and for Codex/OpenAI it uses the OAuth session in OpenCode's
+`auth.json`. Nothing to install separately.
 
 Prefer to be walked through it? Run `npx opencode-hard-limit init` with no
 flags. It asks **where** the threshold should apply (global or project) and
 prints the next step. `init` without `--install` only writes config; run
 `npx opencode-hard-limit install` afterward to activate the plugin.
 
+## Updating
+
+Updates arrive automatically. Once you have run `install`, OpenCode checks for a
+newer published version of `opencode-hard-limit` on every startup and updates
+the server plugin in the background. The sidebar self-heals to match on the
+same or next restart — no manual steps needed.
+
+If you are upgrading from a version prior to `0.9.0` (which used file copies
+instead of the native plugin registry), run the installer once to migrate:
+
+```sh
+npx opencode-hard-limit@latest install
+```
+
+That removes the old copied files, registers the package for auto-update, and
+redeploys the sidebar. After that you are on the automatic update path.
+
 ## Uninstall
 
-One line removes every file and unregisters the sidebar:
+One line removes every file and unregisters the sidebar and server plugin:
 
 ```sh
 npx opencode-hard-limit uninstall
@@ -64,15 +95,16 @@ Before every model request, on OpenCode's `chat.params` hook:
 
 1. Detect the provider. Only `anthropic` (Claude) and `openai` (Codex) are
    monitored; anything else passes straight through.
-2. Read quota via `npx -y @slkiser/opencode-quota show --json --provider <p>`.
+2. Read quota natively — Anthropic via the local `claude` CLI / OAuth usage
+   API, OpenAI via OpenCode's `auth.json` + the ChatGPT usage endpoint.
 3. Pick the entry for your configured window (`5h` by default).
 4. If `percentRemaining < threshold`, throw and block the call.
 5. If quota **cannot be verified** (timeout, error, bad JSON, missing window),
    block by default. This is a fail-safe you can flip off with
    `--block-on-error false`.
 
-Reads are cached in memory per provider (default 60s) so it does not spawn the
-CLI on every turn.
+Reads are cached in memory per provider (default 60s) so it does not re-probe
+the `claude` CLI or hit the usage endpoints on every turn.
 
 ## Which window: 5h or weekly
 
@@ -161,7 +193,7 @@ is no guessing.
 | `--block-on-error` | `OPENCODE_QUOTA_BLOCK_ON_ERROR` | `blockOnError` | `true` | Block when quota check fails (timeout, unknown error). `false` fails open. |
 | `--block-on-auth-error` | `OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR` | `blockOnAuthError` | `false` | When quota cannot be read due to an auth/token error, `false` allows the call with a warning toast. `true` blocks like a hard stop. |
 | `--cache-ttl` | `OPENCODE_QUOTA_CACHE_TTL_MS` | `cacheTtlMs` | `60000` | In-memory cache TTL per provider (ms). |
-| `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max wait for the quota CLI (ms). |
+| `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max wait for a quota check (ms). |
 
 Environment variables are handy for one-off overrides:
 
@@ -172,18 +204,14 @@ OPENCODE_QUOTA_MIN_REMAINING=90 opencode   # temporarily stricter
 ## Requirements
 
 - OpenCode with plugin support.
-- Network access on the first quota check (so `npx` can fetch
-  `@slkiser/opencode-quota`). It is declared as an optional peer dependency
-  because it is invoked as a CLI, not imported, and tracks the latest `3.x`.
+- **Claude/Anthropic quota:** a local `claude` CLI logged in with a Claude
+  Pro/Max subscription (or `~/.claude/.credentials.json`). Pure API-key/PAYG
+  usage has no subscription window and reads as `unavailable` by design.
+- **Codex/OpenAI quota:** a ChatGPT session token in OpenCode's `auth.json`.
+  An API-plan OAuth token reads as `unavailable` by design.
+- Network access when a live quota check runs (the usage endpoints).
 
 ## Verify it works
-
-Check quota directly:
-
-```sh
-npx -y @slkiser/opencode-quota show --json --provider anthropic
-npx -y @slkiser/opencode-quota show --json --provider openai
-```
 
 Force a block by setting the threshold above your current remaining:
 
@@ -196,9 +224,10 @@ With, say, 81% remaining, the next Claude/Codex call is blocked. Set it back to
 
 ## Upgrade
 
-After updating the package (or pulling this repo), re-run
-`npx opencode-hard-limit install` to copy the new files over, then restart
-OpenCode.
+Once installed via `npx opencode-hard-limit install`, updates arrive
+automatically on every OpenCode startup — no manual steps needed. See the
+[Updating](#updating) section above for details and migration from older
+versions.
 
 ## License
 
