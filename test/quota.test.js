@@ -9,7 +9,9 @@ const {
   mapOpenAIWindow, parseJwt, firstNumeric, extractClaudeCredToken,
 } = __internals;
 
-test("classifyError maps auth/timeout/unreadable", () => {
+test("classifyError maps auth/timeout/ratelimit/unreadable", () => {
+  assert.equal(classifyError("Anthropic API error 429: too many requests"), "ratelimit");
+  assert.equal(classifyError("too many requests"), "ratelimit");
   assert.equal(classifyError("token expired"), "auth");
   assert.equal(classifyError("provider unavailable"), "auth");
   assert.equal(classifyError("Anthropic API error 401: nope"), "auth");

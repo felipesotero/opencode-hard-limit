@@ -61,6 +61,12 @@ test("timeout/unknown error allows when blockOnError=false", () => {
   assert.equal(r.block, false);
 });
 
+test("ratelimit errors always fail open", () => {
+  const r = evaluate("anthropic", errRes("Anthropic API error 429: too many requests", "ratelimit"), CFG);
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "error-allowed:rate-limited");
+});
+
 test("unreadable error allows by default (blockOnAuthError=false)", () => {
   const r = evaluate("anthropic", errRes("no provider data in response", "unreadable"), CFG);
   assert.equal(r.block, false);

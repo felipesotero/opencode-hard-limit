@@ -23,35 +23,93 @@ import { ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
 
 const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
 const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
+const lastFetchAt = new Map(); // "quotaProvider:window" -> timestamp of last real fetch start
+const nextAllowedFetchAt = new Map(); // "quotaProvider:window" -> backoff deadline after a 429
 const lastWarnAt = new Map(); // quotaProvider -> timestamp of last warning toast
-const ERROR_TTL_CAP_MS = 10000; // don't pin a transient failure for the full TTL
+const seenKeys = new Set(); // tracked provider:window combos seen in chat.params
+const ERROR_TTL_CAP_MS = 10000; // cap transient failures; stale entries can be background-refreshed
+const RATE_LIMIT_RE = /(?:\b429\b|rate\s*limit)/i;
+let quotaReader = readWeekly;
 
-async function getQuota(provider, cfg) {
-  const quotaWindow = cfg.window || "Weekly";
-  const cacheKey = `${provider}:${quotaWindow}`;
-  const cached = cache.get(cacheKey);
-  if (cached && Date.now() - cached.at < cached.ttl) return cached.result;
+function cacheKey(provider, window) {
+  return `${provider}:${window}`;
+}
 
-  let pending = inflight.get(cacheKey);
-  if (!pending) {
-    pending = readWeekly({ provider, window: quotaWindow, timeoutMs: cfg.timeoutMs })
-      .then((result) => {
-        // Timestamp AFTER the call returns, so a slow check doesn't shorten
-        // the effective TTL. Cache failures for a shorter window.
-        const ttl = result.ok
-          ? cfg.cacheTtlMs
-          : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
-        cache.set(cacheKey, { at: Date.now(), result, ttl });
-        inflight.delete(cacheKey);
-        return result;
-      })
-      .catch((err) => {
-        inflight.delete(cacheKey);
-        throw err;
-      });
-    inflight.set(cacheKey, pending);
+function getCached(provider, window) {
+  return cache.get(cacheKey(provider, window))?.result ?? null;
+}
+
+function getCacheEntry(provider, window) {
+  return cache.get(cacheKey(provider, window)) ?? null;
+}
+
+function isCacheFresh(entry) {
+  return Boolean(entry && Date.now() - entry.at < entry.ttl);
+}
+
+function isRateLimitError(result) {
+  return Boolean(!result?.ok && typeof result?.error === "string" && RATE_LIMIT_RE.test(result.error));
+}
+
+function parseSeenKey(key) {
+  const i = key.indexOf(":");
+  return i < 0 ? [key, "Weekly"] : [key.slice(0, i), key.slice(i + 1) || "Weekly"];
+}
+
+async function refreshQuota(provider, cfg, { window = cfg.window || "Weekly", force = false } = {}) {
+  const quotaWindow = window || "Weekly";
+  const key = cacheKey(provider, quotaWindow);
+  const cached = cache.get(key);
+  const now = Date.now();
+
+  if (!force && cached && now - cached.at < cached.ttl) return cached.result;
+
+  const pending = inflight.get(key);
+  if (pending) return pending;
+
+  const lastStarted = lastFetchAt.get(key);
+  const nextAllowed = nextAllowedFetchAt.get(key) ?? 0;
+  if (!force && nextAllowed > now) {
+    return cached?.result ?? null;
   }
-  return pending;
+  if (!force && lastStarted !== undefined && now - lastStarted < cfg.minRefreshIntervalMs) {
+    return cached?.result ?? null;
+  }
+
+  lastFetchAt.set(key, now);
+
+  const pendingFetch = quotaReader({ provider, window: quotaWindow, timeoutMs: cfg.timeoutMs })
+    .then((result) => {
+      const finishedAt = Date.now();
+      const ttl = result.ok ? cfg.cacheTtlMs : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
+
+      if (result.ok) {
+        cache.set(key, { at: finishedAt, result, ttl });
+        nextAllowedFetchAt.delete(key);
+      } else if (isRateLimitError(result)) {
+        if (!cached) {
+          cache.set(key, { at: finishedAt, result, ttl });
+        }
+        nextAllowedFetchAt.set(key, finishedAt + cfg.rateLimitBackoffMs);
+      } else {
+        cache.set(key, { at: finishedAt, result, ttl });
+        nextAllowedFetchAt.delete(key);
+      }
+
+      return result;
+    })
+    .catch((err) => {
+      const finishedAt = Date.now();
+      lastFetchAt.set(key, finishedAt);
+      nextAllowedFetchAt.delete(key);
+      throw err;
+    })
+    .finally(() => {
+      inflight.delete(key);
+    });
+
+  inflight.set(key, pendingFetch);
+  return pendingFetch;
 }
 
 /** Extract the human-readable tail after the last ':' in reason, or return fallback. */
@@ -76,6 +134,7 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
   return {
     "chat.params": async (input) => {
       const cfg = resolveConfig({ projectDir: directory }).values;
+      const quotaWindow = cfg.window || "Weekly";
 
       const providerId =
         input?.provider?.info?.id ??
@@ -85,7 +144,19 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
       const quotaProvider = resolveQuotaProvider(providerId);
       if (!quotaProvider) return; // provider not monitored -> allow
 
-      const res = await getQuota(quotaProvider, cfg);
+      const key = cacheKey(quotaProvider, quotaWindow);
+      seenKeys.add(key);
+
+      const cachedEntry = getCacheEntry(quotaProvider, quotaWindow);
+      let res;
+      if (!cachedEntry) {
+        res = await refreshQuota(quotaProvider, cfg, { window: quotaWindow, force: true });
+      } else {
+        res = cachedEntry.result;
+        if (!isCacheFresh(cachedEntry)) {
+          refreshQuota(quotaProvider, cfg, { window: quotaWindow }).catch(() => {});
+        }
+      }
       const { block, reason } = evaluate(quotaProvider, res, cfg);
 
       if (block) {
@@ -145,7 +216,57 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
         }
       }
     },
+    event: async ({ event }) => {
+      try {
+        if (!event || typeof event !== "object") return;
+
+        const isIdle =
+          event.type === "session.idle" ||
+          (event.type === "session.status" && event.properties?.status?.type === "idle");
+        if (!isIdle || seenKeys.size === 0) return;
+
+        const cfg = resolveConfig({ projectDir: directory }).values;
+        const refreshes = [];
+
+        for (const key of seenKeys) {
+          const [provider, window] = parseSeenKey(key);
+          refreshes.push(refreshQuota(provider, cfg, { window }));
+        }
+
+        await Promise.allSettled(refreshes);
+      } catch {
+        // event hook must never interfere with the agent lifecycle
+      }
+    },
   };
+};
+
+QuotaHardStopPlugin.__test__ = {
+  cache,
+  inflight,
+  lastFetchAt,
+  nextAllowedFetchAt,
+  lastWarnAt,
+  seenKeys,
+  cacheKey,
+  getCacheEntry,
+  getCached,
+  isCacheFresh,
+  refreshQuota,
+  clearState() {
+    cache.clear();
+    inflight.clear();
+    lastFetchAt.clear();
+    nextAllowedFetchAt.clear();
+    lastWarnAt.clear();
+    seenKeys.clear();
+  },
+  setQuotaReader(fn) {
+    quotaReader = typeof fn === "function" ? fn : readWeekly;
+  },
+  resetQuotaReader() {
+    quotaReader = readWeekly;
+  },
 };
 
 export default QuotaHardStopPlugin;

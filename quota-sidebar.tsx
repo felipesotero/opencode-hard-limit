@@ -8,7 +8,12 @@ import { resolveConfig } from "./lib/config.js";
 
 const PLUGIN_ID = "felipesotero.quota-sidebar";
 const SIDEBAR_ORDER = 175;
-const POLL_INTERVAL_MS = 60_000;
+const DEFAULT_POLL_INTERVAL_MS = 120_000;
+const POLL_INTERVAL_MS = (() => {
+  const raw = process.env.OPENCODE_QUOTA_SIDEBAR_POLL_MS;
+  const parsed = raw == null || raw.trim() === "" ? NaN : Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_POLL_INTERVAL_MS;
+})();
 const READ_TIMEOUT_MS = 10_000;
 const BAR_WIDTH = 14;
 const SAFE_HEADROOM_BAND = 30;
@@ -186,15 +191,17 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
           });
         }),
       );
+    } catch {
+      // keep the polling cadence intact even if one refresh fails unexpectedly
     } finally {
       inFlight = false;
     }
   };
 
   onMount(() => {
-    void refresh();
+    void refresh().catch(() => {});
     interval = setInterval(() => {
-      void refresh();
+      void refresh().catch(() => {});
     }, POLL_INTERVAL_MS);
 
     props.api.lifecycle.onDispose(() => {

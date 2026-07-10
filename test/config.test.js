@@ -40,11 +40,17 @@ test("defaults apply when nothing is set", () => {
       OPENCODE_QUOTA_BLOCK_ON_ERROR: undefined,
       OPENCODE_QUOTA_CACHE_TTL_MS: undefined,
       OPENCODE_QUOTA_TIMEOUT_MS: undefined,
+      OPENCODE_QUOTA_MIN_REFRESH_MS: undefined,
+      OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS: undefined,
     },
     () => {
       const { values, sources } = resolveConfig({ projectDir: proj });
       assert.equal(values.minRemaining, DEFAULTS.minRemaining);
       assert.equal(sources.minRemaining, "default");
+      assert.equal(values.minRefreshIntervalMs, DEFAULTS.minRefreshIntervalMs);
+      assert.equal(sources.minRefreshIntervalMs, "default");
+      assert.equal(values.rateLimitBackoffMs, DEFAULTS.rateLimitBackoffMs);
+      assert.equal(sources.rateLimitBackoffMs, "default");
     },
   );
 });
@@ -97,6 +103,22 @@ test("invalid values fall through to default", () => {
   });
 });
 
+test("refresh spacing values reject invalid inputs", () => {
+  const { xdg, proj } = sandbox();
+  withEnv(
+    {
+      XDG_CONFIG_HOME: xdg,
+      OPENCODE_QUOTA_MIN_REFRESH_MS: "0",
+      OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS: "12.5",
+    },
+    () => {
+      const r = resolveConfig({ projectDir: proj });
+      assert.equal(r.values.minRefreshIntervalMs, DEFAULTS.minRefreshIntervalMs);
+      assert.equal(r.values.rateLimitBackoffMs, DEFAULTS.rateLimitBackoffMs);
+    },
+  );
+});
+
 test("minRemaining clamps to 0..100", () => {
   const { xdg, proj } = sandbox();
   withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_MIN_REMAINING: "999" }, () => {
@@ -128,6 +150,24 @@ test("blockOnAuthError coercion and env override", () => {
     // invalid -> falls through to default (false)
     assert.equal(resolveConfig({ projectDir: proj }).values.blockOnAuthError, false);
   });
+});
+
+test("refresh spacing and rate-limit backoff resolve from env", () => {
+  const { xdg, proj } = sandbox();
+  withEnv(
+    {
+      XDG_CONFIG_HOME: xdg,
+      OPENCODE_QUOTA_MIN_REFRESH_MS: "120000",
+      OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS: "300000",
+    },
+    () => {
+      const { values, sources } = resolveConfig({ projectDir: proj });
+      assert.equal(values.minRefreshIntervalMs, 120000);
+      assert.equal(sources.minRefreshIntervalMs, "env");
+      assert.equal(values.rateLimitBackoffMs, 300000);
+      assert.equal(sources.rateLimitBackoffMs, "env");
+    },
+  );
 });
 
 test("window: default is 5h", () => {

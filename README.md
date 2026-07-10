@@ -95,16 +95,22 @@ Before every model request, on OpenCode's `chat.params` hook:
 
 1. Detect the provider. Only `anthropic` (Claude) and `openai` (Codex) are
    monitored; anything else passes straight through.
-2. Read quota natively — Anthropic via the local `claude` CLI / OAuth usage
-   API, OpenAI via OpenCode's `auth.json` + the ChatGPT usage endpoint.
-3. Pick the entry for your configured window (`5h` by default).
-4. If `percentRemaining < threshold`, throw and block the call.
-5. If quota **cannot be verified** (timeout, error, bad JSON, missing window),
+2. Use the last cached quota immediately; `chat.params` no longer fetches on the
+   hot path.
+3. If there is no cache yet, do one protected fetch so the first request is
+   still guarded.
+4. Refresh quota mostly when the agent goes idle (`session.status=idle` /
+   `session.idle`), spaced by `minRefreshIntervalMs` (default 120s).
+5. If a refresh gets a 429 / rate-limit response, back off for
+   `rateLimitBackoffMs` (default 300s) and keep serving the last known good
+   cache.
+6. If `percentRemaining < threshold`, throw and block the call.
+7. If quota **cannot be verified** (timeout, error, bad JSON, missing window),
    block by default. This is a fail-safe you can flip off with
    `--block-on-error false`.
 
-Reads are cached in memory per provider (default 60s) so it does not re-probe
-the `claude` CLI or hit the usage endpoints on every turn.
+`cacheTtlMs` still controls how long a read is considered fresh for the refresh
+path and warning-toast throttling.
 
 ## Which window: 5h or weekly
 
@@ -133,7 +139,8 @@ sidebar. For each monitored provider it shows:
 - A `Resets in Xh Ymin` line so you know when the window rolls over.
 
 It reads the **same** threshold and window as the hard-stop (no extra config),
-polls every 60s, and appears after you restart OpenCode.
+polls every 120s by default (`OPENCODE_QUOTA_SIDEBAR_POLL_MS` override), and
+appears after you restart OpenCode.
 
 <details>
 <summary>Why the widget ships as raw <code>.tsx</code> (not bundled)</summary>
@@ -194,6 +201,14 @@ is no guessing.
 | `--block-on-auth-error` | `OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR` | `blockOnAuthError` | `false` | When quota cannot be read due to an auth/token error, `false` allows the call with a warning toast. `true` blocks like a hard stop. |
 | `--cache-ttl` | `OPENCODE_QUOTA_CACHE_TTL_MS` | `cacheTtlMs` | `60000` | In-memory cache TTL per provider (ms). |
 | `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max wait for a quota check (ms). |
+| `--min-refresh` | `OPENCODE_QUOTA_MIN_REFRESH_MS` | `minRefreshIntervalMs` | `120000` | Minimum spacing between real quota fetches per provider/window (ms). |
+| `--rate-limit-backoff` | `OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS` | `rateLimitBackoffMs` | `300000` | Extra cooldown after a 429 / rate-limit response (ms). |
+
+Sidebar polling:
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `OPENCODE_QUOTA_SIDEBAR_POLL_MS` | `120000` | Sidebar refresh interval (ms). |
 
 Environment variables are handy for one-off overrides:
 
