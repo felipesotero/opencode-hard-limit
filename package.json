@@ -1,6 +1,6 @@
 {
   "name": "opencode-hard-limit",
-  "version": "0.9.2",
+  "version": "0.10.0",
   "description": "OpenCode plugin that hard-stops model calls before you burn through your AI quota. Monitors the 5h or weekly window for Claude and Codex, blocks at a configurable percent-remaining threshold, and shows a live usage bar in the sidebar. Set your goal per-project or globally via CLI or env.",
   "type": "module",
   "main": "quota-hard-stop.js",

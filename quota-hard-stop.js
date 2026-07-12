@@ -16,19 +16,16 @@
 //   env var > project file > global file > built-in default.
 // See README.md and `opencode-hard-limit --help` for details.
 
-import { readWeekly, MONITORED_PROVIDERS } from "./lib/quota.js";
+import { readWeekly, MONITORED_PROVIDERS, quotaCachePath } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
 import { resolveQuotaProvider, evaluate } from "./lib/evaluate.js";
 import { ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
 
 const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
 const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
-const lastFetchAt = new Map(); // "quotaProvider:window" -> timestamp of last real fetch start
-const nextAllowedFetchAt = new Map(); // "quotaProvider:window" -> backoff deadline after a 429
 const lastWarnAt = new Map(); // quotaProvider -> timestamp of last warning toast
 const seenKeys = new Set(); // tracked provider:window combos seen in chat.params
 const ERROR_TTL_CAP_MS = 10000; // cap transient failures; stale entries can be background-refreshed
-const RATE_LIMIT_RE = /(?:\b429\b|rate\s*limit)/i;
 let quotaReader = readWeekly;
 
 function cacheKey(provider, window) {
@@ -47,10 +44,6 @@ function isCacheFresh(entry) {
   return Boolean(entry && Date.now() - entry.at < entry.ttl);
 }
 
-function isRateLimitError(result) {
-  return Boolean(!result?.ok && typeof result?.error === "string" && RATE_LIMIT_RE.test(result.error));
-}
-
 function parseSeenKey(key) {
   const i = key.indexOf(":");
   return i < 0 ? [key, "Weekly"] : [key.slice(0, i), key.slice(i + 1) || "Weekly"];
@@ -60,48 +53,35 @@ async function refreshQuota(provider, cfg, { window = cfg.window || "Weekly", fo
   const quotaWindow = window || "Weekly";
   const key = cacheKey(provider, quotaWindow);
   const cached = cache.get(key);
-  const now = Date.now();
 
-  if (!force && cached && now - cached.at < cached.ttl) return cached.result;
+  if (!force && cached && Date.now() - cached.at < cached.ttl) return cached.result;
 
   const pending = inflight.get(key);
   if (pending) return pending;
 
-  const lastStarted = lastFetchAt.get(key);
-  const nextAllowed = nextAllowedFetchAt.get(key) ?? 0;
-  if (!force && nextAllowed > now) {
-    return cached?.result ?? null;
-  }
-  if (!force && lastStarted !== undefined && now - lastStarted < cfg.minRefreshIntervalMs) {
-    return cached?.result ?? null;
-  }
-
-  lastFetchAt.set(key, now);
-
-  const pendingFetch = quotaReader({ provider, window: quotaWindow, timeoutMs: cfg.timeoutMs })
+  const pendingFetch = quotaReader({
+    provider,
+    window: quotaWindow,
+    timeoutMs: cfg.timeoutMs,
+    cacheTtlMs: cfg.cacheTtlMs,
+    rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+    minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+    cacheFile: quotaCachePath(),
+  })
     .then((result) => {
       const finishedAt = Date.now();
+      const at = typeof result?.receivedAt === "number" ? result.receivedAt : finishedAt;
       const ttl = result.ok ? cfg.cacheTtlMs : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
 
       if (result.ok) {
-        cache.set(key, { at: finishedAt, result, ttl });
-        nextAllowedFetchAt.delete(key);
-      } else if (isRateLimitError(result)) {
-        if (!cached) {
-          cache.set(key, { at: finishedAt, result, ttl });
-        }
-        nextAllowedFetchAt.set(key, finishedAt + cfg.rateLimitBackoffMs);
+        cache.set(key, { at, result, ttl });
       } else {
-        cache.set(key, { at: finishedAt, result, ttl });
-        nextAllowedFetchAt.delete(key);
+        cache.set(key, { at, result, ttl });
       }
 
       return result;
     })
     .catch((err) => {
-      const finishedAt = Date.now();
-      lastFetchAt.set(key, finishedAt);
-      nextAllowedFetchAt.delete(key);
       throw err;
     })
     .finally(() => {
@@ -244,8 +224,6 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
 QuotaHardStopPlugin.__test__ = {
   cache,
   inflight,
-  lastFetchAt,
-  nextAllowedFetchAt,
   lastWarnAt,
   seenKeys,
   cacheKey,
@@ -256,10 +234,9 @@ QuotaHardStopPlugin.__test__ = {
   clearState() {
     cache.clear();
     inflight.clear();
-    lastFetchAt.clear();
-    nextAllowedFetchAt.clear();
     lastWarnAt.clear();
     seenKeys.clear();
+    quotaReader = readWeekly;
   },
   setQuotaReader(fn) {
     quotaReader = typeof fn === "function" ? fn : readWeekly;

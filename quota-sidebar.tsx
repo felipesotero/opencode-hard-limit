@@ -3,7 +3,7 @@ import { RGBA } from "@opentui/core";
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import { createSignal, onCleanup, onMount } from "solid-js";
 
-import { MONITORED_PROVIDERS, readWeekly } from "./lib/quota.js";
+import { MONITORED_PROVIDERS, readWeekly, quotaCachePath } from "./lib/quota.js";
 import { resolveConfig } from "./lib/config.js";
 
 const PLUGIN_ID = "felipesotero.quota-sidebar";
@@ -26,6 +26,8 @@ type WeeklyQuotaResult = {
   unlimited: boolean;
   window?: string;
   error?: string;
+  stale?: boolean;
+  receivedAt?: number;
 };
 
 type QuotaSnapshot = WeeklyQuotaResult & {
@@ -71,9 +73,10 @@ function safeWindow(projectDir: string): string {
 }
 
 function normalizeResult(result: WeeklyQuotaResult): QuotaSnapshot {
+  const receivedAt = typeof result.receivedAt === "number" ? result.receivedAt : Date.now();
   return {
     ...result,
-    receivedAt: Date.now(),
+    receivedAt,
   };
 }
 
@@ -86,6 +89,12 @@ function errorSnapshot(message?: string): QuotaSnapshot {
     unlimited: false,
     error: message,
   });
+}
+
+function formatStaleAge(receivedAt: number): string {
+  const diff = Math.max(0, Date.now() - receivedAt);
+  const minutes = Math.max(1, Math.round(diff / 60_000));
+  return `stale ${minutes}m`;
 }
 
 function gradientTone(theme: { success: RGBA; warning: RGBA; error: RGBA }, remaining: number, minRemaining: number): RGBA {
@@ -150,8 +159,10 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
   void props.sessionID;
 
   const theme = props.api.theme.current;
-  const minRemaining = safeMinRemaining(props.api.state.path.directory);
-  const quotaWindow = safeWindow(props.api.state.path.directory);
+  const projectDir = props.api.state.path.directory;
+  const cfg = resolveConfig({ projectDir }).values;
+  const minRemaining = safeMinRemaining(projectDir);
+  const quotaWindow = safeWindow(projectDir);
   const [snapshot, setSnapshot] = createSignal<QuotaMap>({});
 
   let inFlight = false;
@@ -167,7 +178,15 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
           let next: QuotaSnapshot;
 
           try {
-            const result = (await readWeekly({ provider: provider.id, window: quotaWindow, timeoutMs: READ_TIMEOUT_MS })) as WeeklyQuotaResult;
+            const result = (await readWeekly({
+              provider: provider.id,
+              window: quotaWindow,
+              timeoutMs: READ_TIMEOUT_MS,
+              cacheTtlMs: cfg.cacheTtlMs,
+              minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+              rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+              cacheFile: quotaCachePath(),
+            })) as WeeklyQuotaResult;
             next = result.status === "ok" ? normalizeResult(result) : errorSnapshot(result.error ?? "quota unavailable");
           } catch (error) {
             next = errorSnapshot(error instanceof Error ? error.message : "quota unavailable");
@@ -177,6 +196,16 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
 
           setSnapshot((current) => {
             const previous = current[provider.id];
+            if (next.status === "error" && previous?.status === "ok") {
+              return {
+                ...current,
+                [provider.id]: {
+                  ...previous,
+                  stale: true,
+                },
+              };
+            }
+
             const carriedResetAt = next.status === "ok" && (next.resetAt === null || next.resetAt === undefined) && hasResetAt(previous)
               ? previous.resetAt
               : next.resetAt;
@@ -270,6 +299,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
             const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
             const markerTone = blocked ? theme.error : theme.border;
             const resetText = formatResetCountdown(state?.resetAt);
+            const staleText = state?.stale ? `· ${formatStaleAge(state.receivedAt)}` : null;
 
             return (
               <box gap={0} flexDirection="column">
@@ -280,6 +310,11 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                   <text fg={tone} wrapMode="none">
                     {` ${stateText}`}
                   </text>
+                  {staleText ? (
+                    <text fg={theme.textMuted} wrapMode="none">
+                      {` ${staleText}`}
+                    </text>
+                  ) : null}
                 </box>
 
                 {bar ? (
@@ -305,6 +340,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                     {resetText}
                   </text>
                 ) : null}
+
               </box>
             );
           })

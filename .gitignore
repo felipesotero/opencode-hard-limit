@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 .env
 .env.*
+# Guard: stray/installer-generated project config (we use ~/.config/opencode/opencode.jsonc)
+/opencode.json
+# Local-only: agent guidance, not shipped to the public repo
+/AGENTS.md
