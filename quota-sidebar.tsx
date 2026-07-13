@@ -278,7 +278,6 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
             const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
             const markerTone = blocked ? theme.error : theme.border;
             const effectiveWindow = state?.window ?? windows[provider.id];
-            const windowAnnotation = state?.windowFallback ? `${effectiveWindow} (auto)` : effectiveWindow;
             const resetText = formatReset(state?.resetAt, effectiveWindow);
             const staleText =
               state?.stale && Number.isFinite(state.receivedAt) && Date.now() - state.receivedAt > STALE_ANNOTATION_MIN_AGE_MS
@@ -292,7 +291,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                     <b>{provider.label}</b>
                   </text>
                   <text fg={theme.textMuted} wrapMode="none">
-                    {` ${windowAnnotation}`}
+                    {` ${effectiveWindow}`}
                   </text>
                   <text fg={tone} wrapMode="none">
                     {` ${stateText}`}

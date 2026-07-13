@@ -155,8 +155,8 @@ shows `(inherits window)` for any per-provider key that isn't explicitly set.
 If the requested window (whether from `--window` or an explicit per-provider
 override) simply doesn't exist on your account, the plugin automatically
 falls back to whichever window the account *does* expose instead of erroring
-out. The sidebar marks a fallback row with `(auto)` next to the window name
-(e.g. `OpenAI Weekly (auto) 92% left, limit 25%`), and the first time this
+out. The sidebar shows the effective window that's actually being used
+(e.g. `OpenAI Weekly 92% left, limit 25%`), and the first time this
 happens per process you'll get a one-time warning toast telling you which
 window was substituted and how to silence it — set the provider's window
 explicitly to the one that actually exists:
