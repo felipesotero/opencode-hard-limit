@@ -17,6 +17,7 @@ const POLL_INTERVAL_MS = (() => {
 const READ_TIMEOUT_MS = 10_000;
 const BAR_WIDTH = 14;
 const SAFE_HEADROOM_BAND = 30;
+const STALE_ANNOTATION_MIN_AGE_MS = 5 * 60 * 1000; // only show the stale hint once the snapshot is older than 5 minutes
 
 type WeeklyQuotaResult = {
   ok: boolean;
@@ -299,7 +300,10 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
             const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
             const markerTone = blocked ? theme.error : theme.border;
             const resetText = formatResetCountdown(state?.resetAt);
-            const staleText = state?.stale ? `· ${formatStaleAge(state.receivedAt)}` : null;
+            const staleText =
+              state?.stale && Number.isFinite(state.receivedAt) && Date.now() - state.receivedAt > STALE_ANNOTATION_MIN_AGE_MS
+                ? `· ${formatStaleAge(state.receivedAt)}`
+                : null;
 
             return (
               <box gap={0} flexDirection="column">

@@ -3,7 +3,7 @@
 Stop [OpenCode](https://opencode.ai) before it burns through your AI quota.
 
 `opencode-hard-limit` is a plugin that watches your Claude/Anthropic and
-Codex/OpenAI usage and puts a **hard stop** on model calls once you drop below a
+OpenAI usage and puts a **hard stop** on model calls once you drop below a
 percent-remaining threshold you choose. It also adds a live **sidebar bar** so
 you can see exactly how much you have left and when the window resets.
 
@@ -53,7 +53,7 @@ Then **restart OpenCode**. That is it.
 
 There is **no external quota dependency**. The plugin reads quota itself:
 for Claude/Anthropic it uses your local `claude` CLI (or the OAuth usage API as
-a fallback), and for Codex/OpenAI it uses the OAuth session in OpenCode's
+a fallback), and for OpenAI it uses the OAuth session in OpenCode's
 `auth.json`. Nothing to install separately.
 
 Prefer to be walked through it? Run `npx opencode-hard-limit init` with no
@@ -93,7 +93,7 @@ dependencies are left in place (other plugins may use them).
 
 Before every model request, on OpenCode's `chat.params` hook:
 
-1. Detect the provider. Only `anthropic` (Claude) and `openai` (Codex) are
+1. Detect the provider. Only `anthropic` (Claude) and `openai` (OpenAI) are
    monitored; anything else passes straight through.
 2. Use the last cached quota immediately; `chat.params` no longer fetches on the
    hot path.
@@ -222,7 +222,7 @@ OPENCODE_QUOTA_MIN_REMAINING=90 opencode   # temporarily stricter
 - **Claude/Anthropic quota:** a local `claude` CLI logged in with a Claude
   Pro/Max subscription (or `~/.claude/.credentials.json`). Pure API-key/PAYG
   usage has no subscription window and reads as `unavailable` by design.
-- **Codex/OpenAI quota:** a ChatGPT session token in OpenCode's `auth.json`.
+- **OpenAI quota:** a ChatGPT session token in OpenCode's `auth.json`.
   An API-plan OAuth token reads as `unavailable` by design.
 - Network access when a live quota check runs (the usage endpoints).
 
@@ -234,7 +234,7 @@ Force a block by setting the threshold above your current remaining:
 OPENCODE_QUOTA_MIN_REMAINING=90 opencode
 ```
 
-With, say, 81% remaining, the next Claude/Codex call is blocked. Set it back to
+With, say, 81% remaining, the next Claude/OpenAI call is blocked. Set it back to
 `30` (or unset) for normal operation.
 
 ## Upgrade
