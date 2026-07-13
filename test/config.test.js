@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { resolveConfig, DEFAULTS } from "../lib/config.js";
 
@@ -42,6 +43,7 @@ test("defaults apply when nothing is set", () => {
       OPENCODE_QUOTA_TIMEOUT_MS: undefined,
       OPENCODE_QUOTA_MIN_REFRESH_MS: undefined,
       OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS: undefined,
+      OPENCODE_QUOTA_STALE_BLOCK_MARGIN: undefined,
     },
     () => {
       const { values, sources } = resolveConfig({ projectDir: proj });
@@ -51,6 +53,8 @@ test("defaults apply when nothing is set", () => {
       assert.equal(sources.minRefreshIntervalMs, "default");
       assert.equal(values.rateLimitBackoffMs, DEFAULTS.rateLimitBackoffMs);
       assert.equal(sources.rateLimitBackoffMs, "default");
+      assert.equal(values.staleBlockMarginPct, DEFAULTS.staleBlockMarginPct);
+      assert.equal(sources.staleBlockMarginPct, "default");
     },
   );
 });
@@ -159,6 +163,7 @@ test("refresh spacing and rate-limit backoff resolve from env", () => {
       XDG_CONFIG_HOME: xdg,
       OPENCODE_QUOTA_MIN_REFRESH_MS: "120000",
       OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS: "300000",
+      OPENCODE_QUOTA_STALE_BLOCK_MARGIN: "15",
     },
     () => {
       const { values, sources } = resolveConfig({ projectDir: proj });
@@ -166,8 +171,40 @@ test("refresh spacing and rate-limit backoff resolve from env", () => {
       assert.equal(sources.minRefreshIntervalMs, "env");
       assert.equal(values.rateLimitBackoffMs, 300000);
       assert.equal(sources.rateLimitBackoffMs, "env");
+      assert.equal(values.staleBlockMarginPct, 15);
+      assert.equal(sources.staleBlockMarginPct, "env");
     },
   );
+});
+
+test("staleBlockMarginPct clamps to 0..100", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_STALE_BLOCK_MARGIN: "999" }, () => {
+    assert.equal(resolveConfig({ projectDir: proj }).values.staleBlockMarginPct, 100);
+  });
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_STALE_BLOCK_MARGIN: "-5" }, () => {
+    assert.equal(resolveConfig({ projectDir: proj }).values.staleBlockMarginPct, 0);
+  });
+});
+
+test("CLI writes stale-margin to project config", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg }, () => {
+    const result = spawnSync(
+      process.execPath,
+      [join(process.cwd(), "bin", "cli.js"), "set", "--threshold", "44", "--stale-margin", "17", "--project"],
+      {
+        cwd: proj,
+        env: { ...process.env, XDG_CONFIG_HOME: xdg },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.minRemaining, 44);
+    assert.equal(r.values.staleBlockMarginPct, 17);
+    assert.equal(r.sources.staleBlockMarginPct, "project");
+  });
 });
 
 test("window: default is 5h", () => {

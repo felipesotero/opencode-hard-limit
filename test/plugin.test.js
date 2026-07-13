@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { evaluate, resolveQuotaProvider } from "../lib/evaluate.js";
 
-const CFG = { minRemaining: 30, blockOnError: true, blockOnAuthError: false, cacheTtlMs: 60000, timeoutMs: 20000 };
+const CFG = { minRemaining: 30, blockOnError: true, blockOnAuthError: false, cacheTtlMs: 60000, timeoutMs: 20000, minRefreshIntervalMs: 120000, staleBlockMarginPct: 10 };
 
 // Build a normalized ok result as returned by readWeekly().
 function okRes(weeklyRemaining, extra = {}) {
@@ -49,6 +49,75 @@ test("unlimited weekly never blocks", () => {
   const r = evaluate("anthropic", okRes(0, { unlimited: true }), CFG);
   assert.equal(r.block, false);
   assert.equal(r.reason, "unlimited");
+});
+
+test("blind-by-backoff blocks inside margin", () => {
+  const now = Date.now();
+  const r = evaluate(
+    "anthropic",
+    okRes(35, { receivedAt: now, backoffUntil: now + 60000 }),
+    CFG,
+  );
+  assert.equal(r.block, true);
+  assert.equal(r.reason, "stale-failsafe");
+});
+
+test("blind-by-age blocks inside margin", () => {
+  const now = Date.now();
+  const r = evaluate("anthropic", okRes(35, { receivedAt: now - 400000 }), CFG, now);
+  assert.equal(r.block, true);
+  assert.equal(r.reason, "stale-failsafe");
+});
+
+test("ordinary stale age at defaults does not block", () => {
+  const now = Date.now();
+  const r = evaluate("anthropic", okRes(35, { receivedAt: now - 90000 }), CFG, now);
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
+});
+
+test("healthy blind LKG allows", () => {
+  const now = Date.now();
+  const r = evaluate(
+    "anthropic",
+    okRes(89, { receivedAt: now, backoffUntil: now + 60000 }),
+    CFG,
+  );
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
+});
+
+test("stale margin 0 disables the fail-safe", () => {
+  const now = Date.now();
+  const r = evaluate("anthropic", okRes(35, { receivedAt: now - 400000 }), { ...CFG, staleBlockMarginPct: 0 }, now);
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
+});
+
+test("resetAt in the past exempts stale fail-safe", () => {
+  const now = Date.now();
+  const r = evaluate(
+    "anthropic",
+    okRes(35, { receivedAt: now - 400000, backoffUntil: now + 60000, resetAt: new Date(now - 60000).toISOString() }),
+    CFG,
+    now,
+  );
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
+});
+
+test("missing receivedAt stays non-blind", () => {
+  const now = Date.now();
+  const r = evaluate("anthropic", okRes(35, { backoffUntil: undefined }), CFG, now);
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
+});
+
+test("strict boundary at threshold plus margin allows", () => {
+  const now = Date.now();
+  const r = evaluate("anthropic", okRes(40, { receivedAt: now - 400000, backoffUntil: now + 60000 }), CFG, now);
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
 });
 
 test("timeout/unknown error blocks when blockOnError=true", () => {

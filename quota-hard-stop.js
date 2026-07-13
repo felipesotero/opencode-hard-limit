@@ -146,6 +146,13 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
             `quota ${res.remaining}% remaining is below the ${cfg.minRemaining}% threshold. ` +
             `Raise your budget: opencode-hard-limit set --threshold <lower> --global ` +
             `(or OPENCODE_QUOTA_MIN_REMAINING=<lower>).`;
+        } else if (reason === "stale-failsafe") {
+          const ageMin = Math.round((Date.now() - res.receivedAt) / 60000);
+          blockMsg =
+            `last known quota ${res.remaining}% is ${ageMin}min old and could not be refreshed` +
+            `${res.backoffUntil ? " (usage endpoint rate-limited, retry ~" + new Date(res.backoffUntil).toLocaleTimeString() + ")" : ""}; ` +
+            `it is within ${cfg.staleBlockMarginPct}% of your ${cfg.minRemaining}% threshold, so blocking as a precaution. ` +
+            `Set OPENCODE_QUOTA_STALE_BLOCK_MARGIN=0 (or --stale-margin 0) to disable the stale fail-safe.`;
         } else if (reason === "unreadable") {
           blockMsg =
             `quota data is unreadable (percentRemaining missing). ` +

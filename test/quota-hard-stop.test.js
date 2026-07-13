@@ -109,3 +109,45 @@ test("stale cache is served immediately and refreshes in the background", async 
     __test__.clearState();
   }
 });
+
+test("chat.params throws stale-failsafe message for a seeded backoff cache entry", async () => {
+  const { xdg, proj } = sandbox();
+  const cacheDir = join(xdg, "opencode", "opencode-hard-limit");
+  mkdirSync(cacheDir, { recursive: true });
+  writeFileSync(
+    join(cacheDir, "quota-cache.json"),
+    JSON.stringify(
+      {
+        "anthropic:5h": {
+          at: 100_000,
+          nextAllowedAt: 800_000,
+          result: {
+            ok: true,
+            status: "ok",
+            remaining: 35,
+            resetAt: null,
+            unlimited: false,
+            window: "5h",
+          },
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+
+  const savedNow = Date.now;
+  Date.now = () => 500_000;
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg }, async () => {
+      const plugin = await QuotaHardStopPlugin({ directory: proj, client: { tui: { showToast: () => Promise.resolve() } } });
+      await assert.rejects(
+        plugin["chat.params"]({ provider: { info: { id: "anthropic" } } }),
+        /stale fail-safe/,
+      );
+    });
+  } finally {
+    Date.now = savedNow;
+    __test__.clearState();
+  }
+});

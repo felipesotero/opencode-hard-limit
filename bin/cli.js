@@ -77,6 +77,7 @@ function buildPatch(values) {
   if (values["timeout"] !== undefined) patch.timeoutMs = values["timeout"];
   if (values["min-refresh"] !== undefined) patch.minRefreshIntervalMs = values["min-refresh"];
   if (values["rate-limit-backoff"] !== undefined) patch.rateLimitBackoffMs = values["rate-limit-backoff"];
+  if (values["stale-margin"] !== undefined) patch.staleBlockMarginPct = values["stale-margin"];
   if (values.window !== undefined) patch.window = values.window;
   return patch;
 }
@@ -92,6 +93,7 @@ const SHARED_OPTIONS = {
   timeout: { type: "string" },
   "min-refresh": { type: "string" },
   "rate-limit-backoff": { type: "string" },
+  "stale-margin": { type: "string" },
   window: { type: "string" },
   install: { type: "boolean" },
   help: { type: "boolean", short: "h" },
@@ -289,6 +291,7 @@ Settings (all optional except threshold for 'set'):
   --timeout ms         quota CLI timeout (default ${DEFAULTS.timeoutMs})
   --min-refresh ms     minimum spacing between real quota fetches (default ${DEFAULTS.minRefreshIntervalMs})
   --rate-limit-backoff ms  extra cooldown after a 429/rate-limit (default ${DEFAULTS.rateLimitBackoffMs})
+  --stale-margin pct   extra block margin while quota is blind/stale (default ${DEFAULTS.staleBlockMarginPct}; 0 disables)
   --window w           quota window to track: 5h | Weekly (default ${DEFAULTS.window})
 
 Examples:
@@ -325,7 +328,7 @@ async function main() {
     const patch = buildPatch(values);
 
     if (cmd === "set" && Object.keys(patch).length === 0) {
-      fail("nothing to set. Pass --threshold N (and optionally --block-on-error / --cache-ttl / --timeout / --min-refresh / --rate-limit-backoff).");
+      fail("nothing to set. Pass --threshold N (and optionally --block-on-error / --cache-ttl / --timeout / --min-refresh / --rate-limit-backoff / --stale-margin).");
     }
     if (cmd === "init" && patch.minRemaining === undefined) {
       patch.minRemaining = DEFAULTS.minRemaining; // sane default for first-time setup

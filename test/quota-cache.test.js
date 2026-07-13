@@ -142,6 +142,7 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
         assert.equal(first.ok, true);
         assert.equal(first.remaining, 90);
         assert.equal(first.stale, undefined);
+        assert.equal(first.backoffUntil, undefined);
 
         const before = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"];
         assert.equal(before.result.remaining, 90);
@@ -172,6 +173,7 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
           assert.equal(second.ok, true);
           assert.equal(second.remaining, 90);
           assert.equal(second.stale, true);
+          assert.equal(second.backoffUntil, 12000);
           assert.equal(fetchCalls, 1);
 
           const after = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"];
@@ -190,8 +192,58 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
           assert.equal(third.ok, true);
           assert.equal(third.remaining, 90);
           assert.equal(third.stale, true);
+          assert.equal(third.backoffUntil, 12000);
           assert.equal(fetchCalls, 1);
         });
+      },
+    );
+  } finally {
+    Date.now = savedNow;
+    global.fetch = savedFetch;
+  }
+});
+
+test("429 without LKG returns ratelimit error and backoffUntil", async () => {
+  const { home, xdg, cacheFile, bin } = sandbox();
+  writeClaudeStub(bin);
+  writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok" } }), "utf8");
+
+  const savedNow = Date.now;
+  const savedFetch = global.fetch;
+  let now = 1_000;
+  Date.now = () => now;
+
+  try {
+    await withEnv(
+      {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        OPENCODE_QUOTA_CLAUDE_BIN: bin,
+        QHL_CLAUDE_MODE: "noWindows",
+      },
+      async () => {
+        global.fetch = async () => ({
+          ok: false,
+          status: 429,
+          headers: { get: (name) => (String(name).toLowerCase() === "retry-after" ? "7" : null) },
+          text: async () => "rate limited",
+        });
+
+        const result = await readWeekly({
+          provider: "anthropic",
+          window: "Weekly",
+          cacheFile,
+          cacheTtlMs: 500,
+          minRefreshIntervalMs: 500,
+          rateLimitBackoffMs: 30_000,
+          timeoutMs: 1000,
+        });
+
+        assert.equal(result.ok, false);
+        assert.equal(result.errorKind, "ratelimit");
+        assert.equal(result.backoffUntil, 8000);
+        const after = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"];
+        assert.equal(after.nextAllowedAt, 8000);
       },
     );
   } finally {
