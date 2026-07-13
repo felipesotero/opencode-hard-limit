@@ -120,6 +120,38 @@ test("strict boundary at threshold plus margin allows", () => {
   assert.equal(r.reason, "ok");
 });
 
+test("epoch-0 resetAt no longer disables the stale-failsafe", () => {
+  // Previously `parseResetAt(0) < now` was true unconditionally, exempting
+  // the stale-failsafe for any bogus/epoch-0 resetAt. The bounded-past guard
+  // now requires the reset to be within one window-duration of `now`.
+  const now = Date.now();
+  const r = evaluate(
+    "anthropic",
+    okRes(35, { receivedAt: now - 400000, backoffUntil: now + 60000, resetAt: 0 }),
+    CFG,
+    now,
+  );
+  assert.equal(r.block, true);
+  assert.equal(r.reason, "stale-failsafe");
+});
+
+test("resetAt exactly at the window-duration boundary in the past still exempts", () => {
+  const now = Date.now();
+  const duration = 604_800_000; // Weekly window duration (lib/reset.js WINDOW_DURATION_MS.Weekly)
+  const r = evaluate(
+    "anthropic",
+    okRes(35, {
+      receivedAt: now - 400000,
+      backoffUntil: now + 60000,
+      resetAt: new Date(now - duration).toISOString(),
+    }),
+    CFG,
+    now,
+  );
+  assert.equal(r.block, false);
+  assert.equal(r.reason, "ok");
+});
+
 test("timeout/unknown error blocks when blockOnError=true", () => {
   const r = evaluate("anthropic", errRes("cli-failed", "unknown"), CFG);
   assert.equal(r.block, true);

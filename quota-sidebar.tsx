@@ -4,7 +4,8 @@ import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plug
 import { createSignal, onCleanup, onMount } from "solid-js";
 
 import { MONITORED_PROVIDERS, readWeekly, quotaCachePath } from "./lib/quota.js";
-import { resolveConfig } from "./lib/config.js";
+import { resolveConfig, windowForProvider } from "./lib/config.js";
+import { formatReset } from "./lib/reset.js";
 
 const PLUGIN_ID = "felipesotero.quota-sidebar";
 const SIDEBAR_ORDER = 175;
@@ -26,6 +27,8 @@ type WeeklyQuotaResult = {
   resetAt: string | number | null;
   unlimited: boolean;
   window?: string;
+  windowFallback?: boolean;
+  requestedWindow?: string;
   error?: string;
   stale?: boolean;
   receivedAt?: number;
@@ -63,10 +66,10 @@ function safeMinRemaining(projectDir: string): number {
   }
 }
 
-function safeWindow(projectDir: string): string {
+function safeWindowFor(projectDir: string, providerId: string): string {
   try {
     const cfg = resolveConfig({ projectDir }).values;
-    const w = String(cfg.window ?? "Weekly");
+    const w = String(windowForProvider(cfg, providerId) ?? "Weekly");
     return w === "5h" ? "5h" : "Weekly";
   } catch {
     return "Weekly";
@@ -122,36 +125,6 @@ function buildBar(remaining: number, minRemaining: number): { filled: string; em
   };
 }
 
-function formatResetCountdown(resetAt: string | number | null | undefined): string | null {
-  if (resetAt === null || resetAt === undefined || resetAt === "") return null;
-
-  // resetAt may arrive as an ISO string, an epoch in seconds, or an epoch in
-  // milliseconds. The quota CLI currently returns epoch seconds as a number, so
-  // normalize before constructing a Date. Values below 1e12 are treated as
-  // seconds and scaled to milliseconds; larger numeric values are already ms.
-  let resetTime: number;
-  if (typeof resetAt === "number") {
-    resetTime = resetAt < 1e12 ? resetAt * 1000 : resetAt;
-  } else {
-    const digits = /^\d+$/.test(resetAt.trim());
-    if (digits) {
-      const n = Number(resetAt.trim());
-      resetTime = n < 1e12 ? n * 1000 : n;
-    } else {
-      resetTime = new Date(resetAt).getTime();
-    }
-  }
-  if (!Number.isFinite(resetTime)) return null;
-
-  const diff = resetTime - Date.now();
-  if (diff <= 0) return null;
-
-  const hours = Math.floor(diff / 3_600_000);
-  const minutes = Math.floor((diff % 3_600_000) / 60_000);
-
-  return `Resets in ${hours}h ${minutes}min`;
-}
-
 function hasResetAt(value: QuotaSnapshot | undefined): value is QuotaSnapshot & { resetAt: string | number } {
   return Boolean(value && value.resetAt !== null && value.resetAt !== undefined && value.resetAt !== "");
 }
@@ -163,7 +136,10 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
   const projectDir = props.api.state.path.directory;
   const cfg = resolveConfig({ projectDir }).values;
   const minRemaining = safeMinRemaining(projectDir);
-  const quotaWindow = safeWindow(projectDir);
+  const windows: Record<string, string> = {};
+  for (const provider of MONITORED_PROVIDERS) {
+    windows[provider.id] = safeWindowFor(projectDir, provider.id);
+  }
   const [snapshot, setSnapshot] = createSignal<QuotaMap>({});
 
   let inFlight = false;
@@ -181,7 +157,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
           try {
             const result = (await readWeekly({
               provider: provider.id,
-              window: quotaWindow,
+              window: windows[provider.id],
               timeoutMs: READ_TIMEOUT_MS,
               cacheTtlMs: cfg.cacheTtlMs,
               minRefreshIntervalMs: cfg.minRefreshIntervalMs,
@@ -207,7 +183,9 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
               };
             }
 
-            const carriedResetAt = next.status === "ok" && (next.resetAt === null || next.resetAt === undefined) && hasResetAt(previous)
+            // quotaWindow is fixed per mount so a mismatch is currently unreachable;
+            // guard is defensive against TUI reload/config-change semantics we don't control.
+            const carriedResetAt = next.status === "ok" && (next.resetAt === null || next.resetAt === undefined) && hasResetAt(previous) && previous.window === next.window
               ? previous.resetAt
               : next.resetAt;
 
@@ -257,7 +235,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
     <box gap={1} flexDirection="column">
       <box flexDirection="row">
         <text fg={theme.text} wrapMode="none">
-          <b>Quota ({quotaWindow})</b>
+          <b>Quota</b>
         </text>
       </box>
 
@@ -299,7 +277,9 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                 : "quota unavailable";
             const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
             const markerTone = blocked ? theme.error : theme.border;
-            const resetText = formatResetCountdown(state?.resetAt);
+            const effectiveWindow = state?.window ?? windows[provider.id];
+            const windowAnnotation = state?.windowFallback ? `${effectiveWindow} (auto)` : effectiveWindow;
+            const resetText = formatReset(state?.resetAt, effectiveWindow);
             const staleText =
               state?.stale && Number.isFinite(state.receivedAt) && Date.now() - state.receivedAt > STALE_ANNOTATION_MIN_AGE_MS
                 ? `· ${formatStaleAge(state.receivedAt)}`
@@ -310,6 +290,9 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                 <box flexDirection="row">
                   <text fg={theme.text} wrapMode="none">
                     <b>{provider.label}</b>
+                  </text>
+                  <text fg={theme.textMuted} wrapMode="none">
+                    {` ${windowAnnotation}`}
                   </text>
                   <text fg={tone} wrapMode="none">
                     {` ${stateText}`}

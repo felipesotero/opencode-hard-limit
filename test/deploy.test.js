@@ -61,6 +61,11 @@ function fakePkgRoot(dir, tsxContent = "// fake sidebar\nexport default function
     "// lib/config.js\nexport function resolveConfig() {}",
     "utf8",
   );
+  writeFileSync(
+    join(dir, "lib", "reset.js"),
+    "// lib/reset.js\nexport function formatReset() {}",
+    "utf8",
+  );
   return dir;
 }
 
@@ -79,7 +84,7 @@ test("ensureTuiDeployed: deploys sidebar on first call", () => {
   });
 });
 
-test("ensureTuiDeployed: deploys lib/quota.js and lib/config.js alongside the tsx", () => {
+test("ensureTuiDeployed: deploys lib/quota.js, lib/config.js, and lib/reset.js alongside the tsx", () => {
   const { root, xdg } = sandbox();
   const pkg = fakePkgRoot(join(root, "pkg"));
   withEnv({ XDG_CONFIG_HOME: xdg }, () => {
@@ -93,6 +98,10 @@ test("ensureTuiDeployed: deploys lib/quota.js and lib/config.js alongside the ts
       existsSync(join(plugins, "lib", "config.js")),
       "lib/config.js should be deployed into plugins/lib/",
     );
+    assert.ok(
+      existsSync(join(plugins, "lib", "reset.js")),
+      "lib/reset.js should be deployed into plugins/lib/",
+    );
     // Verify bytes match the source.
     const srcQuota = readFileSync(join(pkg, "lib", "quota.js"));
     const dstQuota = readFileSync(join(plugins, "lib", "quota.js"));
@@ -100,6 +109,9 @@ test("ensureTuiDeployed: deploys lib/quota.js and lib/config.js alongside the ts
     const srcConfig = readFileSync(join(pkg, "lib", "config.js"));
     const dstConfig = readFileSync(join(plugins, "lib", "config.js"));
     assert.ok(srcConfig.equals(dstConfig), "deployed lib/config.js bytes must match source");
+    const srcReset = readFileSync(join(pkg, "lib", "reset.js"));
+    const dstReset = readFileSync(join(plugins, "lib", "reset.js"));
+    assert.ok(srcReset.equals(dstReset), "deployed lib/reset.js bytes must match source");
   });
 });
 

@@ -128,6 +128,46 @@ npx opencode-hard-limit set --window 5h --global
 
 Both the hard-stop and the sidebar follow whichever window you set.
 
+### Per-provider window override
+
+Not every account exposes both windows. Some ChatGPT/Codex accounts only
+expose a **Weekly** window (no rolling 5h window at all), while Anthropic
+typically exposes both. Rather than force one global `--window` for every
+provider, you can override the window for just one provider and let the other
+keep inheriting the base `--window`:
+
+```sh
+# OpenAI/Codex account only has a Weekly window; keep Claude on the default 5h
+npx opencode-hard-limit set --window-openai Weekly --global
+
+# Or pin Claude to Weekly while OpenAI stays on 5h
+npx opencode-hard-limit set --window-anthropic Weekly --global
+```
+
+`--window-anthropic` / `--window-openai` (env: `OPENCODE_QUOTA_WINDOW_ANTHROPIC`
+/ `OPENCODE_QUOTA_WINDOW_OPENAI`) take precedence over the base `--window` for
+that provider only, at every config layer (env > project > global > default).
+If unset, the provider simply inherits `--window`. `opencode-hard-limit get`
+shows `(inherits window)` for any per-provider key that isn't explicitly set.
+
+### Automatic fallback when the requested window doesn't exist
+
+If the requested window (whether from `--window` or an explicit per-provider
+override) simply doesn't exist on your account, the plugin automatically
+falls back to whichever window the account *does* expose instead of erroring
+out. The sidebar marks a fallback row with `(auto)` next to the window name
+(e.g. `OpenAI Weekly (auto) 92% left, limit 25%`), and the first time this
+happens per process you'll get a one-time warning toast telling you which
+window was substituted and how to silence it — set the provider's window
+explicitly to the one that actually exists:
+
+```sh
+opencode-hard-limit set --window-openai Weekly --global
+```
+
+Once set explicitly to a window your account has, the request succeeds
+directly with no fallback and no further warning.
+
 ## Sidebar usage bar
 
 The install step also registers a small SolidJS TUI widget in OpenCode's
@@ -197,6 +237,8 @@ is no guessing.
 | --- | --- | --- | --- | --- |
 | `--threshold` | `OPENCODE_QUOTA_MIN_REMAINING` | `minRemaining` | `30` | Minimum `%` remaining to allow a call. `30` blocks once 70% is used. |
 | `--window` | `OPENCODE_QUOTA_WINDOW` | `window` | `5h` | Quota window to track: `5h` or `Weekly`. |
+| `--window-anthropic` | `OPENCODE_QUOTA_WINDOW_ANTHROPIC` | `windowAnthropic` | *(inherits `window`)* | Override the quota window for Claude/Anthropic only. |
+| `--window-openai` | `OPENCODE_QUOTA_WINDOW_OPENAI` | `windowOpenai` | *(inherits `window`)* | Override the quota window for OpenAI/Codex only. |
 | `--block-on-error` | `OPENCODE_QUOTA_BLOCK_ON_ERROR` | `blockOnError` | `true` | Block when quota check fails (timeout, unknown error). `false` fails open. |
 | `--block-on-auth-error` | `OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR` | `blockOnAuthError` | `false` | When quota cannot be read due to an auth/token error, `false` allows the call with a warning toast. `true` blocks like a hard stop. |
 | `--cache-ttl` | `OPENCODE_QUOTA_CACHE_TTL_MS` | `cacheTtlMs` | `60000` | In-memory cache TTL per provider (ms). |

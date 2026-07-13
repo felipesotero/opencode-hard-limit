@@ -17,7 +17,7 @@
 // See README.md and `opencode-hard-limit --help` for details.
 
 import { readWeekly, MONITORED_PROVIDERS, quotaCachePath } from "./lib/quota.js";
-import { resolveConfig } from "./lib/config.js";
+import { resolveConfig, windowForProvider } from "./lib/config.js";
 import { resolveQuotaProvider, evaluate } from "./lib/evaluate.js";
 import { ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
 
@@ -25,6 +25,7 @@ const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
 const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
 const lastWarnAt = new Map(); // quotaProvider -> timestamp of last warning toast
 const seenKeys = new Set(); // tracked provider:window combos seen in chat.params
+const fallbackWarned = new Set(); // quotaProvider -> already warned about a window fallback this process
 const ERROR_TTL_CAP_MS = 10000; // cap transient failures; stale entries can be background-refreshed
 let quotaReader = readWeekly;
 
@@ -49,7 +50,7 @@ function parseSeenKey(key) {
   return i < 0 ? [key, "Weekly"] : [key.slice(0, i), key.slice(i + 1) || "Weekly"];
 }
 
-async function refreshQuota(provider, cfg, { window = cfg.window || "Weekly", force = false } = {}) {
+async function refreshQuota(provider, cfg, { window = windowForProvider(cfg, provider), force = false } = {}) {
   const quotaWindow = window || "Weekly";
   const key = cacheKey(provider, quotaWindow);
   const cached = cache.get(key);
@@ -114,7 +115,6 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
   return {
     "chat.params": async (input) => {
       const cfg = resolveConfig({ projectDir: directory }).values;
-      const quotaWindow = cfg.window || "Weekly";
 
       const providerId =
         input?.provider?.info?.id ??
@@ -123,6 +123,8 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
 
       const quotaProvider = resolveQuotaProvider(providerId);
       if (!quotaProvider) return; // provider not monitored -> allow
+
+      const quotaWindow = windowForProvider(cfg, quotaProvider);
 
       const key = cacheKey(quotaProvider, quotaWindow);
       seenKeys.add(key);
@@ -138,6 +140,20 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
         }
       }
       const { block, reason } = evaluate(quotaProvider, res, cfg);
+
+      if (res?.windowFallback && !fallbackWarned.has(quotaProvider)) {
+        fallbackWarned.add(quotaProvider);
+        const providerEntry = MONITORED_PROVIDERS.find((p) => p.id === quotaProvider);
+        const label = providerEntry?.label ?? quotaProvider;
+        client?.tui?.showToast({
+          body: {
+            message:
+              `${label} has no ${res.requestedWindow} quota window on this account; monitoring the ${res.window} window instead. ` +
+              `Silence this by setting: opencode-hard-limit set --window-${quotaProvider} ${res.window} --global`,
+            variant: "warning",
+          },
+        })?.catch?.(() => {});
+      }
 
       if (block) {
         let blockMsg;
@@ -233,6 +249,7 @@ QuotaHardStopPlugin.__test__ = {
   inflight,
   lastWarnAt,
   seenKeys,
+  fallbackWarned,
   cacheKey,
   getCacheEntry,
   getCached,
@@ -243,6 +260,7 @@ QuotaHardStopPlugin.__test__ = {
     inflight.clear();
     lastWarnAt.clear();
     seenKeys.clear();
+    fallbackWarned.clear();
     quotaReader = readWeekly;
   },
   setQuotaReader(fn) {

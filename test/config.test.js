@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { resolveConfig, DEFAULTS } from "../lib/config.js";
+import { resolveConfig, DEFAULTS, windowForProvider, writeScope } from "../lib/config.js";
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "qhl-cfg-"));
@@ -261,5 +261,111 @@ test("window: precedence (env > project > global)", () => {
     const r = resolveConfig({ projectDir: proj });
     assert.equal(r.values.window, "5h");
     assert.equal(r.sources.window, "env");
+  });
+});
+
+// -----------------------------------------------------------------------
+// Per-provider window (windowAnthropic / windowOpenai)
+// -----------------------------------------------------------------------
+
+test("windowAnthropic/windowOpenai: not present in DEFAULTS", () => {
+  assert.equal(DEFAULTS.windowAnthropic, undefined);
+  assert.equal(DEFAULTS.windowOpenai, undefined);
+});
+
+test("windowAnthropic/windowOpenai: coercion accepts aliases from file", () => {
+  const { xdg, proj } = sandbox();
+  const gdir = join(xdg, "opencode", "opencode-hard-limit");
+  mkdirSync(gdir, { recursive: true });
+  writeFileSync(join(gdir, "config.json"), JSON.stringify({ windowAnthropic: "daily", windowOpenai: "week" }));
+  withEnv({ XDG_CONFIG_HOME: xdg }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.windowAnthropic, "5h");
+    assert.equal(r.values.windowOpenai, "Weekly");
+    assert.equal(r.sources.windowAnthropic, "global");
+    assert.equal(r.sources.windowOpenai, "global");
+  });
+});
+
+test("windowAnthropic/windowOpenai: coercion accepts aliases from env", () => {
+  const { xdg, proj } = sandbox();
+  withEnv(
+    { XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW_ANTHROPIC: "7d", OPENCODE_QUOTA_WINDOW_OPENAI: "5" },
+    () => {
+      const r = resolveConfig({ projectDir: proj });
+      assert.equal(r.values.windowAnthropic, "Weekly");
+      assert.equal(r.values.windowOpenai, "5h");
+      assert.equal(r.sources.windowAnthropic, "env");
+      assert.equal(r.sources.windowOpenai, "env");
+    },
+  );
+});
+
+test("windowAnthropic/windowOpenai: invalid value falls through (no per-provider value set)", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW_OPENAI: "monthly" }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.windowOpenai, undefined);
+  });
+});
+
+test("windowForProvider: base window only -> both providers inherit base", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: "5h" }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(windowForProvider(r.values, "anthropic"), "5h");
+    assert.equal(windowForProvider(r.values, "openai"), "5h");
+  });
+});
+
+test("windowForProvider: per-provider override wins over base window", () => {
+  const { xdg, proj } = sandbox();
+  withEnv(
+    { XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: "5h", OPENCODE_QUOTA_WINDOW_OPENAI: "Weekly" },
+    () => {
+      const r = resolveConfig({ projectDir: proj });
+      assert.equal(windowForProvider(r.values, "anthropic"), "5h");
+      assert.equal(windowForProvider(r.values, "openai"), "Weekly");
+    },
+  );
+});
+
+test("windowForProvider: neither set -> falls to DEFAULTS.window", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(windowForProvider(r.values, "openai"), DEFAULTS.window);
+  });
+});
+
+test("windowForProvider: unknown provider id falls back to base window", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_WINDOW: "Weekly" }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(windowForProvider(r.values, "some-other-provider"), "Weekly");
+  });
+});
+
+test("cross-layer specificity: global windowOpenai=Weekly + project window=5h -> openai=Weekly, anthropic=5h", () => {
+  const { xdg, proj } = sandbox();
+  const gdir = join(xdg, "opencode", "opencode-hard-limit");
+  mkdirSync(gdir, { recursive: true });
+  writeFileSync(join(gdir, "config.json"), JSON.stringify({ windowOpenai: "Weekly" }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({ window: "5h" }));
+
+  withEnv({ XDG_CONFIG_HOME: xdg }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(windowForProvider(r.values, "openai"), "Weekly");
+    assert.equal(windowForProvider(r.values, "anthropic"), "5h");
+  });
+});
+
+test("writeScope round-trip for windowOpenai", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg }, () => {
+    writeScope("project", { windowOpenai: "Weekly" }, proj);
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.windowOpenai, "Weekly");
+    assert.equal(r.sources.windowOpenai, "project");
   });
 });

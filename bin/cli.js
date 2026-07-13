@@ -17,6 +17,7 @@ import {
   writeScope,
   globalConfigPath,
   projectConfigPath,
+  PROVIDER_WINDOW_KEYS,
 } from "../lib/config.js";
 
 import {
@@ -79,6 +80,8 @@ function buildPatch(values) {
   if (values["rate-limit-backoff"] !== undefined) patch.rateLimitBackoffMs = values["rate-limit-backoff"];
   if (values["stale-margin"] !== undefined) patch.staleBlockMarginPct = values["stale-margin"];
   if (values.window !== undefined) patch.window = values.window;
+  if (values["window-anthropic"] !== undefined) patch.windowAnthropic = values["window-anthropic"];
+  if (values["window-openai"] !== undefined) patch.windowOpenai = values["window-openai"];
   return patch;
 }
 
@@ -95,6 +98,8 @@ const SHARED_OPTIONS = {
   "rate-limit-backoff": { type: "string" },
   "stale-margin": { type: "string" },
   window: { type: "string" },
+  "window-anthropic": { type: "string" },
+  "window-openai": { type: "string" },
   install: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 };
@@ -258,8 +263,13 @@ function uninstallPlugin() {
 function showResolved() {
   const { values, sources, paths } = resolveConfig({ projectDir: process.cwd() });
   print("Effective configuration (highest-precedence source wins):");
-  for (const key of Object.keys(DEFAULTS)) {
-    print(`  ${key.padEnd(13)} = ${String(values[key]).padEnd(8)} (from ${sources[key]})`);
+  const allKeys = [...Object.keys(DEFAULTS), ...Object.values(PROVIDER_WINDOW_KEYS)];
+  for (const key of allKeys) {
+    if (Object.values(PROVIDER_WINDOW_KEYS).includes(key) && values[key] === undefined) {
+      print(`  ${key.padEnd(17)} = ${values.window} (inherits window)`);
+      continue;
+    }
+    print(`  ${key.padEnd(17)} = ${String(values[key]).padEnd(8)} (from ${sources[key]})`);
   }
   print("");
   print("Config files:");
@@ -293,6 +303,8 @@ Settings (all optional except threshold for 'set'):
   --rate-limit-backoff ms  extra cooldown after a 429/rate-limit (default ${DEFAULTS.rateLimitBackoffMs})
   --stale-margin pct   extra block margin while quota is blind/stale (default ${DEFAULTS.staleBlockMarginPct}; 0 disables)
   --window w           quota window to track: 5h | Weekly (default ${DEFAULTS.window})
+  --window-anthropic w quota window for Claude only: 5h | Weekly (default: inherits --window)
+  --window-openai w    quota window for OpenAI/Codex only: 5h | Weekly (default: inherits --window)
 
 Examples:
   opencode-hard-limit init --global --threshold 30 --install
@@ -328,7 +340,7 @@ async function main() {
     const patch = buildPatch(values);
 
     if (cmd === "set" && Object.keys(patch).length === 0) {
-      fail("nothing to set. Pass --threshold N (and optionally --block-on-error / --cache-ttl / --timeout / --min-refresh / --rate-limit-backoff / --stale-margin).");
+      fail("nothing to set. Pass --threshold N (and optionally --block-on-error / --cache-ttl / --timeout / --min-refresh / --rate-limit-backoff / --stale-margin / --window / --window-anthropic / --window-openai).");
     }
     if (cmd === "init" && patch.minRemaining === undefined) {
       patch.minRemaining = DEFAULTS.minRemaining; // sane default for first-time setup
