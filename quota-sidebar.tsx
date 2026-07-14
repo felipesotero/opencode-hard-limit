@@ -296,11 +296,6 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                   <text fg={tone} wrapMode="none">
                     {` ${stateText}`}
                   </text>
-                  {staleText ? (
-                    <text fg={theme.textMuted} wrapMode="none">
-                      {` ${staleText}`}
-                    </text>
-                  ) : null}
                 </box>
 
                 {bar ? (
@@ -324,6 +319,12 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                 {resetText ? (
                   <text fg={theme.textMuted} wrapMode="none">
                     {resetText}
+                  </text>
+                ) : null}
+
+                {staleText ? (
+                  <text fg={theme.textMuted} wrapMode="none">
+                    {staleText}
                   </text>
                 ) : null}
 
