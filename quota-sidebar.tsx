@@ -98,7 +98,7 @@ function errorSnapshot(message?: string): QuotaSnapshot {
 function formatStaleAge(receivedAt: number): string {
   const diff = Math.max(0, Date.now() - receivedAt);
   const minutes = Math.max(1, Math.round(diff / 60_000));
-  return `stale ${minutes}m`;
+  return `Last read ${minutes}m ago`;
 }
 
 function gradientTone(theme: { success: RGBA; warning: RGBA; error: RGBA }, remaining: number, minRemaining: number): RGBA {
