@@ -110,7 +110,7 @@ Before every model request, on OpenCode's `chat.params` hook:
    `--block-on-error false`.
 
 `cacheTtlMs` still controls how long a read is considered fresh for the refresh
-path and warning-toast throttling.
+path.
 
 ## Which window: 5h or weekly
 
@@ -155,18 +155,17 @@ shows `(inherits window)` for any per-provider key that isn't explicitly set.
 If the requested window (whether from `--window` or an explicit per-provider
 override) simply doesn't exist on your account, the plugin automatically
 falls back to whichever window the account *does* expose instead of erroring
-out. The sidebar shows the effective window that's actually being used
-(e.g. `OpenAI Weekly 92% left, limit 25%`), and the first time this
-happens per process you'll get a one-time warning toast telling you which
-window was substituted and how to silence it — set the provider's window
-explicitly to the one that actually exists:
+out, silently. The sidebar shows the effective window that's actually being
+used (e.g. `OpenAI Weekly 92% left, limit 25%`) — that's the only signal
+you'll get; there is no toast. To pin the provider to the window your account
+actually exposes:
 
 ```sh
 opencode-hard-limit set --window-openai Weekly --global
 ```
 
 Once set explicitly to a window your account has, the request succeeds
-directly with no fallback and no further warning.
+directly with no fallback needed.
 
 ## Sidebar usage bar
 
@@ -240,7 +239,7 @@ is no guessing.
 | `--window-anthropic` | `OPENCODE_QUOTA_WINDOW_ANTHROPIC` | `windowAnthropic` | *(inherits `window`)* | Override the quota window for Claude/Anthropic only. |
 | `--window-openai` | `OPENCODE_QUOTA_WINDOW_OPENAI` | `windowOpenai` | *(inherits `window`)* | Override the quota window for OpenAI/Codex only. |
 | `--block-on-error` | `OPENCODE_QUOTA_BLOCK_ON_ERROR` | `blockOnError` | `true` | Block when quota check fails (timeout, unknown error). `false` fails open. |
-| `--block-on-auth-error` | `OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR` | `blockOnAuthError` | `false` | When quota cannot be read due to an auth/token error, `false` allows the call with a warning toast. `true` blocks like a hard stop. |
+| `--block-on-auth-error` | `OPENCODE_QUOTA_BLOCK_ON_AUTH_ERROR` | `blockOnAuthError` | `false` | When quota cannot be read due to an auth/token error, `false` allows the call silently (no toast). `true` blocks like a hard stop. |
 | `--cache-ttl` | `OPENCODE_QUOTA_CACHE_TTL_MS` | `cacheTtlMs` | `60000` | In-memory cache TTL per provider (ms). |
 | `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max wait for a quota check (ms). |
 | `--min-refresh` | `OPENCODE_QUOTA_MIN_REFRESH_MS` | `minRefreshIntervalMs` | `120000` | Minimum spacing between real quota fetches per provider/window (ms). |

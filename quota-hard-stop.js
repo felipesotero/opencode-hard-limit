@@ -10,7 +10,8 @@
 // when the remaining percentage is below the threshold.
 //
 // When quota cannot be read due to an auth/token error the call is allowed
-// by default (blockOnAuthError: false) and a throttled warning toast is shown.
+// by default (blockOnAuthError: false) and the call proceeds silently — no
+// toast is shown (the sidebar widget is the only UI surface for quota state).
 //
 // Configuration is resolved by ./lib/config.js with this precedence:
 //   env var > project file > global file > built-in default.
@@ -23,9 +24,7 @@ import { ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
 
 const cache = new Map(); // "quotaProvider:window" -> { at, result, ttl }
 const inflight = new Map(); // "quotaProvider:window" -> Promise (dedupe concurrent checks)
-const lastWarnAt = new Map(); // quotaProvider -> timestamp of last warning toast
 const seenKeys = new Set(); // tracked provider:window combos seen in chat.params
-const fallbackWarned = new Set(); // quotaProvider -> already warned about a window fallback this process
 const ERROR_TTL_CAP_MS = 10000; // cap transient failures; stale entries can be background-refreshed
 let quotaReader = readWeekly;
 
@@ -99,18 +98,12 @@ function humanReason(reason, fallback) {
   return i >= 0 ? reason.slice(i + 1) : fallback;
 }
 
-export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
+export const QuotaHardStopPlugin = async ({ directory } = {}) => {
   // Self-heal: ensure deployed sidebar matches the installed npm version.
   // ensureTuiDeployed never throws — outer try/catch is not needed.
-  const { copied: sidebarUpdated } = ensureTuiDeployed();
+  ensureTuiDeployed();
   // Defer cleanupLegacyCopies to avoid racing opencode's plugins-dir autoloader.
   setTimeout(() => { try { cleanupLegacyCopies(); } catch {} }, 30_000).unref?.();
-  if (sidebarUpdated) {
-    // showToast returns a Promise; use .catch to prevent unhandled rejection.
-    client?.tui?.showToast({
-      body: { message: "hard-limit sidebar updated — restart to refresh", variant: "info" },
-    })?.catch?.(() => {});
-  }
 
   return {
     "chat.params": async (input) => {
@@ -140,20 +133,6 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
         }
       }
       const { block, reason } = evaluate(quotaProvider, res, cfg);
-
-      if (res?.windowFallback && !fallbackWarned.has(quotaProvider)) {
-        fallbackWarned.add(quotaProvider);
-        const providerEntry = MONITORED_PROVIDERS.find((p) => p.id === quotaProvider);
-        const label = providerEntry?.label ?? quotaProvider;
-        client?.tui?.showToast({
-          body: {
-            message:
-              `${label} has no ${res.requestedWindow} quota window on this account; monitoring the ${res.window} window instead. ` +
-              `Silence this by setting: opencode-hard-limit set --window-${quotaProvider} ${res.window} --global`,
-            variant: "warning",
-          },
-        })?.catch?.(() => {});
-      }
 
       if (block) {
         let blockMsg;
@@ -186,38 +165,8 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
           `[quota-hard-stop] Blocked ${providerId} (${quotaProvider}): ${blockMsg}`,
         );
       }
-
-      // Throttled warning toast when quota is unreadable but the call is allowed.
-      if (
-        reason.startsWith("auth-error-allowed:") ||
-        reason === "unreadable-allowed" ||
-        reason.startsWith("error-allowed:")
-      ) {
-        const now = Date.now();
-        if (now - (lastWarnAt.get(quotaProvider) ?? 0) >= cfg.cacheTtlMs) {
-          lastWarnAt.set(quotaProvider, now);
-          try {
-            const providerEntry = MONITORED_PROVIDERS.find((p) => p.id === quotaProvider);
-            const label = providerEntry?.label ?? quotaProvider;
-            const hr = humanReason(reason, "unreadable");
-            let toastMsg;
-            if (reason.startsWith("auth-error-allowed:")) {
-              toastMsg =
-                `${label} quota unreadable (${hr}). ` +
-                `Allowing call; refresh provider login to restore monitoring.`;
-            } else if (reason === "unreadable-allowed") {
-              toastMsg = `${label} quota data unreadable. Allowing call.`;
-            } else {
-              toastMsg =
-                `${label} quota check failed (${hr}). Allowing call.`;
-            }
-            // showToast returns a Promise; use .catch to prevent unhandled rejection.
-            client?.tui?.showToast({ body: { message: toastMsg, variant: "warning" } })?.catch?.(() => {});
-          } catch {
-            // toast failure must not affect model call flow
-          }
-        }
-      }
+      // Otherwise allow silently — no toast/sound; the sidebar widget is the
+      // only surface for quota state (including unreadable/fallback cases).
     },
     event: async ({ event }) => {
       try {
@@ -247,9 +196,7 @@ export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
 QuotaHardStopPlugin.__test__ = {
   cache,
   inflight,
-  lastWarnAt,
   seenKeys,
-  fallbackWarned,
   cacheKey,
   getCacheEntry,
   getCached,
@@ -258,9 +205,7 @@ QuotaHardStopPlugin.__test__ = {
   clearState() {
     cache.clear();
     inflight.clear();
-    lastWarnAt.clear();
     seenKeys.clear();
-    fallbackWarned.clear();
     quotaReader = readWeekly;
   },
   setQuotaReader(fn) {

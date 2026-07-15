@@ -96,10 +96,7 @@ test("stale cache is served immediately and refreshes in the background", async 
       await __test__.refreshQuota("anthropic", cfg, { window: "Weekly", force: true });
 
       now = 200;
-      const plugin = await QuotaHardStopPlugin({
-        directory: proj,
-        client: { tui: { showToast: () => Promise.resolve() } },
-      });
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
 
       const chat = plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
       let settled = false;
@@ -139,10 +136,7 @@ test("chat.params resolves per-provider window: anthropic uses base window, open
         return okResult(80);
       });
 
-      const plugin = await QuotaHardStopPlugin({
-        directory: proj,
-        client: { tui: { showToast: () => Promise.resolve() } },
-      });
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
 
       await plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
       await plugin["chat.params"]({ provider: { info: { id: "openai" } } });
@@ -193,7 +187,7 @@ test("chat.params throws stale-failsafe message for a seeded backoff cache entry
   Date.now = () => 500_000;
   try {
     await withEnv({ XDG_CONFIG_HOME: xdg }, async () => {
-      const plugin = await QuotaHardStopPlugin({ directory: proj, client: { tui: { showToast: () => Promise.resolve() } } });
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
       await assert.rejects(
         plugin["chat.params"]({ provider: { info: { id: "anthropic" } } }),
         /stale fail-safe/,
@@ -205,7 +199,7 @@ test("chat.params throws stale-failsafe message for a seeded backoff cache entry
   }
 });
 
-test("chat.params: windowFallback result warns exactly once across two calls, message mentions --window-openai Weekly", async () => {
+test("chat.params: windowFallback result allows the call silently (no toast/client dependency)", async () => {
   const { xdg, proj } = sandbox();
 
   __test__.clearState();
@@ -213,20 +207,10 @@ test("chat.params: windowFallback result warns exactly once across two calls, me
     await withEnv({ XDG_CONFIG_HOME: xdg }, async () => {
       __test__.setQuotaReader(async () => fallbackResult(80, { window: "Weekly", requestedWindow: "5h" }));
 
-      const toasts = [];
-      const plugin = await QuotaHardStopPlugin({
-        directory: proj,
-        client: { tui: { showToast: (opts) => { toasts.push(opts); return Promise.resolve(); } } },
-      });
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
 
       await plugin["chat.params"]({ provider: { info: { id: "openai" } } });
       await plugin["chat.params"]({ provider: { info: { id: "openai" } } });
-
-      const fallbackToasts = toasts.filter((t) => /has no 5h quota window/.test(t.body.message));
-      assert.equal(fallbackToasts.length, 1, "expected exactly one fallback warning toast across two calls");
-      assert.match(fallbackToasts[0].body.message, /--window-openai Weekly/);
-      assert.equal(fallbackToasts[0].body.variant, "warning");
-      assert.ok(__test__.fallbackWarned.has("openai"));
     });
   } finally {
     __test__.resetQuotaReader();
@@ -234,7 +218,7 @@ test("chat.params: windowFallback result warns exactly once across two calls, me
   }
 });
 
-test("chat.params: fallback warning fires even when the call is blocked (below threshold)", async () => {
+test("chat.params: windowFallback result still blocks when below threshold", async () => {
   const { xdg, proj } = sandbox();
   writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({ minRemaining: 90 }));
 
@@ -243,25 +227,12 @@ test("chat.params: fallback warning fires even when the call is blocked (below t
     await withEnv({ XDG_CONFIG_HOME: xdg }, async () => {
       __test__.setQuotaReader(async () => fallbackResult(10, { window: "Weekly", requestedWindow: "5h" }));
 
-      const toasts = [];
-      const plugin = await QuotaHardStopPlugin({
-        directory: proj,
-        client: { tui: { showToast: (opts) => { toasts.push(opts); return Promise.resolve(); } } },
-      });
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
 
       await assert.rejects(plugin["chat.params"]({ provider: { info: { id: "openai" } } }), /Blocked/);
-
-      const fallbackToasts = toasts.filter((t) => /has no 5h quota window/.test(t.body.message));
-      assert.equal(fallbackToasts.length, 1);
     });
   } finally {
     __test__.resetQuotaReader();
     __test__.clearState();
   }
-});
-
-test("clearState() resets fallbackWarned", async () => {
-  __test__.fallbackWarned.add("openai");
-  __test__.clearState();
-  assert.equal(__test__.fallbackWarned.size, 0);
 });
