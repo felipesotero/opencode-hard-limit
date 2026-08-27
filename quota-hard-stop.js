@@ -17,7 +17,7 @@
 //   env var > project file > global file > built-in default.
 // See README.md and `opencode-hard-limit --help` for details.
 
-import { readWeekly, MONITORED_PROVIDERS, quotaCachePath } from "./lib/quota.js";
+import { readWeekly, MONITORED_PROVIDERS, quotaCachePath, readAnthropicAccountKey } from "./lib/quota.js";
 import { resolveConfig, windowForProvider } from "./lib/config.js";
 import { resolveQuotaProvider, evaluate } from "./lib/evaluate.js";
 import { ensureCliInstalled, ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
@@ -68,6 +68,8 @@ async function refreshQuota(provider, cfg, { window = windowForProvider(cfg, pro
     cacheTtlMs: cfg.cacheTtlMs,
     rateLimitBackoffMs: cfg.rateLimitBackoffMs,
     minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+    accountsFile: cfg.anthropicAccountsFile,
+    credentialSource: cfg.anthropicCredentialSource,
     cacheFile: quotaCachePath(),
   })
     .then((result) => {
@@ -75,11 +77,7 @@ async function refreshQuota(provider, cfg, { window = windowForProvider(cfg, pro
       const at = typeof result?.receivedAt === "number" ? result.receivedAt : finishedAt;
       const ttl = result.ok ? cfg.cacheTtlMs : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
 
-      if (result.ok) {
-        cache.set(key, { at, result, ttl });
-      } else {
-        cache.set(key, { at, result, ttl });
-      }
+      cache.set(key, { at, result, ttl, accountKey: result?.accountKey ?? null });
 
       return result;
     })
@@ -127,7 +125,12 @@ export const QuotaHardStopPlugin = async ({ directory } = {}) => {
 
       const cachedEntry = getCacheEntry(quotaProvider, quotaWindow);
       let res;
-      if (!cachedEntry) {
+      const accountChanged = cachedEntry && quotaProvider === "anthropic" &&
+        (cachedEntry.accountKey ?? null) !== await readAnthropicAccountKey({
+          accountsFile: cfg.anthropicAccountsFile,
+          credentialSource: cfg.anthropicCredentialSource,
+        });
+      if (!cachedEntry || accountChanged) {
         res = await refreshQuota(quotaProvider, cfg, { window: quotaWindow, force: true });
       } else {
         res = cachedEntry.result;

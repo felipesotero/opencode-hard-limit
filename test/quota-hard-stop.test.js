@@ -7,6 +7,7 @@ import { join } from "node:path";
 import QuotaHardStopPlugin from "../quota-hard-stop.js";
 import { resolveConfig } from "../lib/config.js";
 import { writePostpone, clearPostpone } from "../lib/postpone.js";
+import { __internals as quotaInternals } from "../lib/quota.js";
 
 const { __test__ } = QuotaHardStopPlugin;
 __test__.setCliInstaller(() => {});
@@ -20,23 +21,27 @@ function sandbox() {
 }
 
 async function withEnv(env, fn) {
+  const effectiveEnv = { ...env };
+  if (effectiveEnv.XDG_CONFIG_HOME && effectiveEnv.XDG_DATA_HOME === undefined) {
+    effectiveEnv.XDG_DATA_HOME = effectiveEnv.XDG_CONFIG_HOME;
+  }
   const saved = {};
-  for (const k of Object.keys(env)) {
+  for (const k of Object.keys(effectiveEnv)) {
     saved[k] = process.env[k];
-    if (env[k] === undefined) delete process.env[k];
-    else process.env[k] = env[k];
+    if (effectiveEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = effectiveEnv[k];
   }
   try {
     return await fn();
   } finally {
-    for (const k of Object.keys(env)) {
+    for (const k of Object.keys(effectiveEnv)) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
     }
   }
 }
 
-function okResult(remaining) {
+function okResult(remaining, extra = {}) {
   return {
     ok: true,
     status: "ok",
@@ -44,6 +49,7 @@ function okResult(remaining) {
     resetAt: null,
     unlimited: false,
     window: "Weekly",
+    ...extra,
   };
 }
 
@@ -117,7 +123,7 @@ test("stale cache is served immediately and refreshes in the background", async 
         settled = true;
       });
 
-      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 25));
       assert.equal(settled, true);
       assert.equal(calls, 2);
 
@@ -350,6 +356,35 @@ test("block message omits the postpone hint when allowPostpone is disabled (defa
       }
     });
   } finally {
+    __test__.resetQuotaReader();
+    __test__.clearState();
+  }
+});
+
+
+test("chat.params bypasses an in-memory Anthropic entry after account rotation", async () => {
+  const { xdg, proj } = sandbox();
+  const accountsFile = join(xdg, "opencode", "anthropic-multi-account-accounts.json");
+  mkdirSync(join(xdg, "opencode"), { recursive: true });
+  const account = (uuid) => ({ uuid, refreshToken: `refresh-${uuid}`, accessToken: `access-${uuid}`, expiresAt: Date.now() + 3_600_000 });
+  writeFileSync(accountsFile, JSON.stringify({ activeAccountUuid: "A", accounts: [account("A"), account("B")] }));
+  quotaInternals.__resetMultiAccountSticky();
+  __test__.clearState();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: accountsFile }, async () => {
+      const cfg = resolveConfig({ projectDir: proj }).values;
+      let calls = 0;
+      __test__.setQuotaReader(async () => {
+        calls += 1;
+        return okResult(80, { accountKey: calls === 1 ? "ma:A" : "ma:B" });
+      });
+      await __test__.refreshQuota("anthropic", cfg, { window: "5h", force: true });
+      writeFileSync(accountsFile, JSON.stringify({ activeAccountUuid: "B", accounts: [account("A"), account("B")] }));
+      await (await QuotaHardStopPlugin({ directory: proj }))["chat.params"]({ provider: { info: { id: "anthropic" } } });
+      assert.equal(calls, 2);
+    });
+  } finally {
+    quotaInternals.__resetMultiAccountSticky();
     __test__.resetQuotaReader();
     __test__.clearState();
   }

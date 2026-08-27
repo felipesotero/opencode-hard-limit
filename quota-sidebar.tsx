@@ -163,6 +163,8 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
               cacheTtlMs: cfg.cacheTtlMs,
               minRefreshIntervalMs: cfg.minRefreshIntervalMs,
               rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+              accountsFile: cfg.anthropicAccountsFile,
+              credentialSource: cfg.anthropicCredentialSource,
               cacheFile: quotaCachePath(),
             })) as WeeklyQuotaResult;
             next = result.status === "ok" ? normalizeResult(result) : errorSnapshot(result.error ?? "quota unavailable");

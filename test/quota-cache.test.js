@@ -72,7 +72,7 @@ function goodResponse(remaining = 80) {
 }
 
 test("fresh cache short-circuits before any fetch", async () => {
-  const { cacheFile, bin } = sandbox();
+  const { cacheFile, xdg, bin } = sandbox();
   writeClaudeStub(bin);
   const entry = {
     at: 1000,
@@ -90,7 +90,8 @@ test("fresh cache short-circuits before any fetch", async () => {
     throw new Error("network should not be called");
   };
   try {
-    await withEnv({ OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MODE: "noWindows" }, async () => {
+    await withEnv({ OPENCODE_QUOTA_CLAUDE_BIN: bin,
+      XDG_DATA_HOME: xdg, QHL_CLAUDE_MODE: "noWindows" }, async () => {
       const result = await readWeekly({
         provider: "anthropic",
         window: "Weekly",
@@ -127,6 +128,7 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
         HOME: home,
         XDG_CONFIG_HOME: xdg,
         OPENCODE_QUOTA_CLAUDE_BIN: bin,
+      XDG_DATA_HOME: xdg,
         QHL_CLAUDE_MODE: "good",
       },
       async () => {
@@ -219,6 +221,7 @@ test("429 without LKG returns ratelimit error and backoffUntil", async () => {
         HOME: home,
         XDG_CONFIG_HOME: xdg,
         OPENCODE_QUOTA_CLAUDE_BIN: bin,
+      XDG_DATA_HOME: xdg,
         QHL_CLAUDE_MODE: "noWindows",
       },
       async () => {
@@ -262,6 +265,7 @@ test("cacheFile null skips file I/O", async () => {
       HOME: home,
       XDG_CONFIG_HOME: xdg,
       OPENCODE_QUOTA_CLAUDE_BIN: bin,
+      XDG_DATA_HOME: xdg,
       QHL_CLAUDE_MODE: "good",
       OPENCODE_QUOTA_CACHE_FILE: undefined,
     },

@@ -68,6 +68,43 @@ process.exit(1);
   chmodSync(file, 0o755);
 }
 
+function writeTrackingClaudeStub(file, marker) {
+  writeFileSync(
+    file,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.QHL_CLAUDE_MARKER) fs.appendFileSync(process.env.QHL_CLAUDE_MARKER, "called\\n");
+if (args.includes("--version")) { console.log("claude 1.0.0"); process.exit(0); }
+if (args[0] === "auth" && args[1] === "status") {
+  console.log(JSON.stringify({ authenticated: true, five_hour: { used_percentage: 20 } }));
+  process.exit(0);
+}
+process.exit(1);
+`,
+    "utf8",
+  );
+  chmodSync(file, 0o755);
+  return marker;
+}
+
+function writeMultiAccountFile(file, activeAccountUuid, accounts) {
+  writeFileSync(file, JSON.stringify({ version: 1, activeAccountUuid, accounts }), "utf8");
+}
+
+function writeAnthropicAuth(xdg, entry) {
+  writeFileSync(join(xdg, "opencode", "auth.json"), JSON.stringify({ anthropic: entry }), "utf8");
+}
+
+function usageResponse() {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    text: async () => JSON.stringify({ five_hour: { utilization: 20 } }),
+  };
+}
+
 test("classifyError maps auth/timeout/ratelimit/unreadable", () => {
   assert.equal(classifyError("Anthropic API error 429: too many requests"), "ratelimit");
   assert.equal(classifyError("too many requests"), "ratelimit");
@@ -320,7 +357,7 @@ test("fetchOpenAI: no windows at all -> existing error, unaffected by fallback l
 });
 
 test("fetchAnthropic: CLI exposes only five_hour + request Weekly -> falls back via CLI, no HTTP call", async () => {
-  const { bin } = sandbox();
+  const { xdg, bin } = sandbox();
   writeClaudeStubWith(bin, { five_hour: { used_percentage: 15, resets_at: "2030-01-01T00:00:00Z" } });
   const savedFetch = global.fetch;
   let fetchCalls = 0;
@@ -329,7 +366,7 @@ test("fetchAnthropic: CLI exposes only five_hour + request Weekly -> falls back 
     throw new Error("HTTP should not be called when CLI provides a fallback window");
   };
   try {
-    await withEnv({ OPENCODE_QUOTA_CLAUDE_BIN: bin }, async () => {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin }, async () => {
       const result = await readWeekly({ provider: "anthropic", window: "Weekly", cacheFile: null, timeoutMs: 1000 });
       assert.equal(result.ok, true);
       assert.equal(result.window, "5h");
@@ -362,7 +399,7 @@ test("fetchAnthropic: HTTP path exposes only seven_day + request 5h -> falls bac
   });
   try {
     await withEnv(
-      { HOME: home, XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin },
+      { HOME: home, XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin },
       async () => {
         const result = await readWeekly({ provider: "anthropic", window: "5h", cacheFile: null, timeoutMs: 1000 });
         assert.equal(result.ok, true);
@@ -503,5 +540,256 @@ test("readWeekly: a fresh decorated cache read preserves windowFallback/requeste
     });
   } finally {
     global.fetch = savedFetch;
+  }
+});
+
+
+test("multi-account active credential is used before the CLI", async () => {
+  const { xdg, bin, cacheFile } = sandbox();
+  const accountsFile = join(xdg, "anthropic-multi-account-accounts.json");
+  const marker = join(xdg, "cli-called");
+  const account = {
+    uuid: "acct-A", refreshToken: "refresh-A", accessToken: "access-A",
+    expiresAt: Date.now() + 3_600_000, email: "a@example.com", enabled: true,
+  };
+  writeMultiAccountFile(accountsFile, account.uuid, [account]);
+  writeTrackingClaudeStub(bin, marker);
+  const savedFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    assert.equal(options.headers.Authorization, "Bearer access-A");
+    return usageResponse();
+  };
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", window: "5h", accountsFile: accountsFile, cacheFile, timeoutMs: 1000 });
+      assert.equal(result.ok, true);
+      assert.equal(result.accountKey, "ma:acct-A");
+      assert.throws(() => readFileSync(marker, "utf8"));
+    });
+  } finally {
+    global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("unmatched active account isolates the legacy credential chain", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const marker = join(xdg, "cli-called");
+  writeMultiAccountFile(accountsFile, "missing", []);
+  writeTrackingClaudeStub(bin, marker);
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, false);
+      assert.match(result.error, /credential/i);
+      assert.equal(result.errorKind, "auth");
+      assert.throws(() => readFileSync(marker, "utf8"));
+    });
+  } finally {
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("expired active token uses matching OpenCode auth as rescue", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const marker = join(xdg, "cli-called");
+  const account = {
+    uuid: "acct-rescue", refreshToken: "refresh-rescue", accessToken: "expired-access",
+    expiresAt: Date.now() - 1, email: "r@example.com", enabled: true,
+  };
+  writeMultiAccountFile(accountsFile, account.uuid, [account]);
+  writeAnthropicAuth(xdg, { type: "oauth", access: "fresh-access", refresh: "refresh-rescue", expires: Date.now() + 3_600_000 });
+  writeTrackingClaudeStub(bin, marker);
+  const savedFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    assert.equal(options.headers.Authorization, "Bearer fresh-access");
+    return usageResponse();
+  };
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, true);
+      assert.equal(result.accountKey, "ma:acct-rescue");
+      assert.throws(() => readFileSync(marker, "utf8"));
+    });
+  } finally {
+    global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("expired active token rejects mismatched OpenCode auth", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const marker = join(xdg, "cli-called");
+  const account = {
+    uuid: "acct-owned", refreshToken: "refresh-owned", accessToken: "expired-owned",
+    expiresAt: Date.now() - 1, email: "o@example.com", enabled: true,
+  };
+  writeMultiAccountFile(accountsFile, account.uuid, [account]);
+  writeAnthropicAuth(xdg, { type: "oauth", access: "foreign-access", refresh: "foreign-refresh", expires: Date.now() + 3_600_000 });
+  writeTrackingClaudeStub(bin, marker);
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, false);
+      assert.match(result.error, /credential/i);
+      assert.throws(() => readFileSync(marker, "utf8"));
+    });
+  } finally {
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("claude-cli credential source bypasses multi-account tiers", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  writeMultiAccountFile(accountsFile, "acct-A", [{ uuid: "acct-A", accessToken: "account-access", refreshToken: "r", expiresAt: Date.now() + 3_600_000 }]);
+  writeClaudeStubWith(bin, { five_hour: { used_percentage: 25 } });
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, credentialSource: "claude-cli", cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, true);
+      assert.equal(result.remaining, 75);
+      assert.equal(result.accountKey, null);
+    });
+  } finally {
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("sticky multi-account isolation survives a later malformed accounts file", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const marker = join(xdg, "cli-called");
+  const account = { uuid: "acct-sticky", accessToken: "a", refreshToken: "r", expiresAt: Date.now() + 3_600_000 };
+  writeMultiAccountFile(accountsFile, account.uuid, [account]);
+  writeTrackingClaudeStub(bin, marker);
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      assert.ok(await __internals.readMultiAccountActive({ accountsFile }));
+      writeFileSync(accountsFile, "{ truncated", "utf8");
+      const isolated = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(isolated.ok, false);
+      assert.match(isolated.error, /credential/i);
+      assert.throws(() => readFileSync(marker, "utf8"));
+
+      __internals.__resetMultiAccountSticky();
+      const fallback = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(fallback.ok, true);
+      assert.equal(fallback.remaining, 80);
+      assert.ok(readFileSync(marker, "utf8"));
+    });
+  } finally {
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+
+test("missing accounts and OpenCode auth preserve the legacy CLI path", async () => {
+  const { xdg, bin } = sandbox();
+  const marker = join(xdg, "cli-called");
+  writeTrackingClaudeStub(bin, marker);
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, true);
+      assert.equal(result.remaining, 80);
+      assert.ok(readFileSync(marker, "utf8"));
+    });
+  } finally {
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("malformed accounts file before any valid parse preserves the legacy CLI path", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const marker = join(xdg, "cli-called");
+  writeFileSync(accountsFile, "{ malformed", "utf8");
+  writeTrackingClaudeStub(bin, marker);
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, true);
+      assert.equal(result.remaining, 80);
+      assert.ok(readFileSync(marker, "utf8"));
+    });
+  } finally {
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("a pre-existing cache entry without accountKey misses for a managed account", async () => {
+  const { xdg, cacheFile } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const account = { uuid: "acct-cache", refreshToken: "refresh-cache", accessToken: "access-cache", expiresAt: Date.now() + 3_600_000 };
+  writeMultiAccountFile(accountsFile, account.uuid, [account]);
+  writeFileSync(cacheFile, JSON.stringify({
+    "anthropic:5h": {
+      at: Date.now(), nextAllowedAt: Date.now() + 3_600_000,
+      result: { ok: true, status: "ok", remaining: 1, resetAt: null, unlimited: false, window: "5h" },
+    },
+  }), "utf8");
+  const savedFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async (url, options) => {
+    calls += 1;
+    assert.equal(options.headers.Authorization, "Bearer access-cache");
+    return usageResponse();
+  };
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, cacheFile, cacheTtlMs: 60_000, minRefreshIntervalMs: 60_000, timeoutMs: 1000 });
+      assert.equal(result.ok, true);
+      assert.equal(result.accountKey, "ma:acct-cache");
+      assert.equal(calls, 1);
+    });
+  } finally {
+    global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+
+test("managed account rejects a 401 without invoking the legacy CLI", async () => {
+  const { xdg, bin } = sandbox();
+  const accountsFile = join(xdg, "accounts.json");
+  const marker = join(xdg, "cli-called");
+  const account = {
+    uuid: "acct-revoked", refreshToken: "refresh-revoked", accessToken: "revoked-access",
+    expiresAt: Date.now() + 3_600_000, enabled: true,
+  };
+  writeMultiAccountFile(accountsFile, account.uuid, [account]);
+  writeTrackingClaudeStub(bin, marker);
+  const savedFetch = global.fetch;
+  global.fetch = async () => ({
+    ok: false,
+    status: 401,
+    headers: { get: () => null },
+    text: async () => "revoked",
+  });
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg, XDG_DATA_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MARKER: marker }, async () => {
+      const result = await readWeekly({ provider: "anthropic", accountsFile, cacheFile: null, timeoutMs: 1000 });
+      assert.equal(result.ok, false);
+      assert.equal(result.errorKind, "auth");
+      assert.throws(() => readFileSync(marker, "utf8"));
+    });
+  } finally {
+    global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
   }
 });

@@ -274,7 +274,7 @@ function uninstallPlugin() {
 function showResolved() {
   const { values, sources, paths } = resolveConfig({ projectDir: process.cwd() });
   print("Effective configuration (highest-precedence source wins):");
-  const allKeys = [...Object.keys(DEFAULTS), ...Object.values(PROVIDER_WINDOW_KEYS)];
+  const allKeys = [...Object.keys(DEFAULTS), ...Object.values(PROVIDER_WINDOW_KEYS), "anthropicAccountsFile"];
   for (const key of allKeys) {
     if (Object.values(PROVIDER_WINDOW_KEYS).includes(key) && values[key] === undefined) {
       print(`  ${key.padEnd(17)} = ${values.window} (inherits window)`);

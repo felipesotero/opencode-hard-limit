@@ -423,3 +423,29 @@ test("writeScope round-trip for windowOpenai", () => {
     assert.equal(r.sources.windowOpenai, "project");
   });
 });
+
+
+test("anthropic credential settings coerce paths and source enum", () => {
+  const { xdg, proj } = sandbox();
+  withEnv({
+    XDG_CONFIG_HOME: xdg,
+    OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: "  /tmp/accounts.json  ",
+    OPENCODE_QUOTA_ANTHROPIC_CRED_SOURCE: "OPENCode-Auth",
+  }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.anthropicAccountsFile, "/tmp/accounts.json");
+    assert.equal(r.values.anthropicCredentialSource, "opencode-auth");
+    assert.equal(r.sources.anthropicAccountsFile, "env");
+    assert.equal(r.sources.anthropicCredentialSource, "env");
+  });
+
+  withEnv({
+    XDG_CONFIG_HOME: xdg,
+    OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: "   ",
+    OPENCODE_QUOTA_ANTHROPIC_CRED_SOURCE: "foreign",
+  }, () => {
+    const r = resolveConfig({ projectDir: proj });
+    assert.equal(r.values.anthropicAccountsFile, undefined);
+    assert.equal(r.values.anthropicCredentialSource, "auto");
+  });
+});
