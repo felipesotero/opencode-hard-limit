@@ -213,6 +213,48 @@ nothing silently. So the installer copies the source and ensures the three TUI
 runtime deps exist in `~/.config/opencode/`.
 </details>
 
+## Multi-account
+
+If you run more than one Claude and/or OpenAI account side by side,
+`opencode-hard-limit` shows quota for **every** account it can find — no
+extra setup, and no dependency on the plugins that manage those accounts.
+It just reads their on-disk storage format if present:
+
+- **Claude/Anthropic** — if you run multiple isolated Claude Code logins as
+  separate provider instances (the pattern used by
+  [`@openchamber/opencode-claude`](https://github.com/openchamber/opencode-claude)
+  when each instance is pinned to its own `CLAUDE_CONFIG_DIR`, e.g. provider
+  ids `claude-pro` / `claude-max` backed by `~/.claude-profiles/pro` /
+  `~/.claude-profiles/max`), each profile directory's `.credentials.json` is
+  discovered automatically. The hard-stop gate also resolves the **correct**
+  account per call: a request through the `claude-pro` provider checks the
+  `pro` profile's quota, `claude-max` checks `max` — they no longer share one
+  cache entry / one credential.
+- **OpenAI/Codex** — if a multi-account manager such as
+  [`oc-codex-multi-auth`](https://github.com/ndycode/oc-codex-multi-auth) is
+  installed, its account store (default
+  `~/.opencode/oc-codex-multi-auth-accounts.json`) is read directly and every
+  account in it is shown, with the one it marks active labeled accordingly.
+
+Neither integration is a hard dependency — when no multi-account store is
+found for a provider, everything behaves exactly as before (one row, the
+single default login). See what was discovered with:
+
+```sh
+opencode-hard-limit accounts        # human-readable
+opencode-hard-limit accounts --json # machine-readable
+```
+
+The sidebar renders one row per discovered account the same way; the active
+account of a multi-account provider is tagged `(active)`.
+
+Override the discovery locations if yours differ from the defaults:
+
+```sh
+opencode-hard-limit set --anthropic-profile-dirs "/path/a,/path/b" --global
+opencode-hard-limit set --openai-accounts-file /path/to/accounts.json --global
+```
+
 ## Configuration
 
 ### Global vs project
@@ -265,6 +307,8 @@ is no guessing.
 | `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max wait for a quota check (ms). |
 | `--min-refresh` | `OPENCODE_QUOTA_MIN_REFRESH_MS` | `minRefreshIntervalMs` | `120000` | Minimum spacing between real quota fetches per provider/window (ms). |
 | `--rate-limit-backoff` | `OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS` | `rateLimitBackoffMs` | `300000` | Extra cooldown after a 429 / rate-limit response (ms). |
+| `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*` + `~/.claude`)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
+| `--openai-accounts-file` | `OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE` | `openaiAccountsFile` | *(auto: `~/.opencode/oc-codex-multi-auth-accounts.json`)* | Path to a multi-account OpenAI/Codex store. |
 
 Sidebar polling:
 
@@ -352,6 +396,8 @@ block.
 - **OpenAI quota:** a ChatGPT session token in OpenCode's `auth.json`.
   An API-plan OAuth token reads as `unavailable` by design.
 - Network access when a live quota check runs (the usage endpoints).
+- **Multi-account (optional):** see [Multi-account](#multi-account) above —
+  nothing extra to install, just auto-detected on-disk conventions.
 
 ## Verify it works
 

@@ -18,7 +18,10 @@ import {
   globalConfigPath,
   projectConfigPath,
   PROVIDER_WINDOW_KEYS,
+  windowForProvider,
 } from "../lib/config.js";
+
+import { readAccountsWeekly } from "../lib/quota.js";
 
 import {
   configDir,
@@ -105,6 +108,8 @@ function buildPatch(values) {
   if (values["window-anthropic"] !== undefined) patch.windowAnthropic = values["window-anthropic"];
   if (values["window-openai"] !== undefined) patch.windowOpenai = values["window-openai"];
   if (values["allow-postpone"] !== undefined) patch.allowPostpone = values["allow-postpone"];
+  if (values["anthropic-profile-dirs"] !== undefined) patch.anthropicProfileDirs = values["anthropic-profile-dirs"];
+  if (values["openai-accounts-file"] !== undefined) patch.openaiAccountsFile = values["openai-accounts-file"];
   return patch;
 }
 
@@ -124,9 +129,12 @@ const SHARED_OPTIONS = {
   "window-anthropic": { type: "string" },
   "window-openai": { type: "string" },
   "allow-postpone": { type: "string" },
+  "anthropic-profile-dirs": { type: "string" },
+  "openai-accounts-file": { type: "string" },
   clear: { type: "boolean" },
   install: { type: "boolean" },
   "no-star": { type: "boolean" },
+  json: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 };
 
@@ -295,6 +303,10 @@ function showResolved() {
       print(`  ${key.padEnd(17)} = ${values.window} (inherits window)`);
       continue;
     }
+    if (values[key] === undefined) {
+      print(`  ${key.padEnd(17)} = (not set, auto-detected)`);
+      continue;
+    }
     print(`  ${key.padEnd(17)} = ${String(values[key]).padEnd(8)} (from ${sources[key]})`);
   }
   print("");
@@ -313,6 +325,68 @@ function showResolved() {
     } else {
       print("Postpone: not active");
     }
+  }
+}
+
+// Lists every discovered account per monitored provider with its current
+// quota — one row per Claude profile dir (see lib/accounts.js) and one row
+// per oc-codex-multi-auth-style OpenAI account, or a single "default" row
+// per provider when no multi-account store is found for it.
+async function accountsCommand(values) {
+  const cfg = resolveConfig({ projectDir: process.cwd() }).values;
+  const asJson = Boolean(values.json);
+  const providers = [
+    { id: "anthropic", label: "Claude" },
+    { id: "openai", label: "OpenAI" },
+  ];
+
+  const out = [];
+  for (const provider of providers) {
+    const window = windowForProvider(cfg, provider.id);
+    let results;
+    try {
+      results = await readAccountsWeekly({
+        provider: provider.id,
+        window,
+        timeoutMs: cfg.timeoutMs,
+        cacheTtlMs: cfg.cacheTtlMs,
+        rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+        minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+        anthropicProfileDirs: cfg.anthropicProfileDirs,
+        openaiAccountsFile: cfg.openaiAccountsFile,
+      });
+    } catch (err) {
+      results = [
+        { ok: false, error: err?.message || String(err), accountId: "default", accountLabel: provider.label, isActive: true },
+      ];
+    }
+    for (const r of results) {
+      out.push({ provider: provider.id, providerLabel: provider.label, window, ...r });
+    }
+  }
+
+  if (asJson) {
+    print(JSON.stringify(out, null, 2));
+    return;
+  }
+
+  for (const provider of providers) {
+    const rows = out.filter((r) => r.provider === provider.id);
+    print(`${provider.label}:`);
+    for (const r of rows) {
+      const tag = r.isActive && rows.length > 1 ? " (active)" : "";
+      if (!r.ok) {
+        print(`  ${r.accountLabel}${tag}: unavailable (${r.error ?? "unknown error"})`);
+        continue;
+      }
+      if (r.unlimited) {
+        print(`  ${r.accountLabel}${tag}: unlimited`);
+        continue;
+      }
+      const resetPart = r.resetAt ? ` (resets ${new Date(r.resetAt).toLocaleString()})` : "";
+      print(`  ${r.accountLabel}${tag}: ${r.remaining}% left, ${r.window} window${resetPart}`);
+    }
+    print("");
   }
 }
 
@@ -351,6 +425,7 @@ Usage:
   opencode-hard-limit init [--global|--project] [--threshold N] [--install]
   opencode-hard-limit set  --threshold N [--global|--project]
   opencode-hard-limit get
+  opencode-hard-limit accounts [--json]       show quota for every discovered Claude/OpenAI account
   opencode-hard-limit postpone [minutes]      postpone a block for N minutes (default ${DEFAULT_POSTPONE_MINUTES}; requires --allow-postpone)
   opencode-hard-limit postpone --clear        cancel an active postpone early
   opencode-hard-limit install
@@ -378,10 +453,21 @@ Settings (all optional except threshold for 'set'):
   --window-openai w    quota window for OpenAI/Codex only: 5h | Weekly (default: inherits --window)
   --allow-postpone b   enable the "opencode-hard-limit postpone" bypass command: true|false (default ${DEFAULTS.allowPostpone})
 
+Multi-account (optional; auto-detected when present):
+  Claude profiles under ~/.claude-profiles/*/.credentials.json (as set up by
+  @openchamber/opencode-claude's CLAUDE_CONFIG_DIR-per-instance pattern) and
+  a multi-account OpenAI/Codex store such as oc-codex-multi-auth's
+  ~/.opencode/oc-codex-multi-auth-accounts.json are both picked up
+  automatically — no extra setup needed. Override the locations with:
+    --anthropic-profile-dirs, comma-separated (config key: anthropicProfileDirs)
+    --openai-accounts-file (config key: openaiAccountsFile)
+  Run 'opencode-hard-limit accounts' to see what was discovered.
+
 Examples:
   opencode-hard-limit init --global --threshold 30 --install
   opencode-hard-limit set --threshold 30 --global
   opencode-hard-limit get
+  opencode-hard-limit accounts
   opencode-hard-limit set --allow-postpone true --global
   opencode-hard-limit postpone 60`);
 }
@@ -397,6 +483,11 @@ async function main() {
 
   if (cmd === "get" || cmd === "show") {
     showResolved();
+    return;
+  }
+
+  if (cmd === "accounts") {
+    await accountsCommand(values);
     return;
   }
 
