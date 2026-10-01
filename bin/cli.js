@@ -105,6 +105,7 @@ function buildPatch(values) {
   if (values["min-refresh"] !== undefined) patch.minRefreshIntervalMs = values["min-refresh"];
   if (values["rate-limit-backoff"] !== undefined) patch.rateLimitBackoffMs = values["rate-limit-backoff"];
   if (values["max-rate-limit-backoff"] !== undefined) patch.maxRateLimitBackoffMs = values["max-rate-limit-backoff"];
+  if (values["no-baseline-rate-limit-backoff"] !== undefined) patch.noBaselineRateLimitBackoffMs = values["no-baseline-rate-limit-backoff"];
   if (values["stale-margin"] !== undefined) patch.staleBlockMarginPct = values["stale-margin"];
   if (values.window !== undefined) patch.window = values.window;
   if (values["window-anthropic"] !== undefined) patch.windowAnthropic = values["window-anthropic"];
@@ -127,6 +128,7 @@ const SHARED_OPTIONS = {
   "min-refresh": { type: "string" },
   "rate-limit-backoff": { type: "string" },
   "max-rate-limit-backoff": { type: "string" },
+  "no-baseline-rate-limit-backoff": { type: "string" },
   "stale-margin": { type: "string" },
   window: { type: "string" },
   "window-anthropic": { type: "string" },
@@ -354,6 +356,7 @@ async function accountsCommand(values) {
         cacheTtlMs: cfg.cacheTtlMs,
         rateLimitBackoffMs: cfg.rateLimitBackoffMs,
         maxRateLimitBackoffMs: cfg.maxRateLimitBackoffMs,
+        noBaselineRateLimitBackoffMs: cfg.noBaselineRateLimitBackoffMs,
         minRefreshIntervalMs: cfg.minRefreshIntervalMs,
         accountsFile: cfg.anthropicAccountsFile,
         credentialSource: cfg.anthropicCredentialSource,
@@ -460,6 +463,7 @@ Settings (all optional except threshold for 'set'):
   --min-refresh ms     minimum spacing between real quota fetches (default ${DEFAULTS.minRefreshIntervalMs})
   --rate-limit-backoff ms  extra cooldown after a 429/rate-limit (default ${DEFAULTS.rateLimitBackoffMs})
   --max-rate-limit-backoff ms  cap on a 429's server-sent Retry-After (default ${DEFAULTS.maxRateLimitBackoffMs})
+  --no-baseline-rate-limit-backoff ms  tighter cap used instead when there's no last-known-good reading yet (default ${DEFAULTS.noBaselineRateLimitBackoffMs})
   --stale-margin pct   extra block margin while quota is blind/stale (default ${DEFAULTS.staleBlockMarginPct}; 0 disables)
   --window w           quota window to track: 5h | Weekly (default ${DEFAULTS.window})
   --window-anthropic w quota window for Claude only: 5h | Weekly (default: inherits --window)

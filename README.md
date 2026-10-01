@@ -126,6 +126,12 @@ Before every model request, on OpenCode's `chat.params` hook:
    (default 600s), since Anthropic's usage endpoint can ask for the better part
    of an hour — otherwise for `rateLimitBackoffMs` (default 300s). Either way,
    keep serving the last known good cache.
+   If there is no last known good reading yet to serve through the backoff
+   (e.g. the very first check for an account, or a 429 right after a token
+   refresh), the cap is tightened to `noBaselineRateLimitBackoffMs` (default
+   60s) instead: there is nothing being protected, so re-checking sooner is
+   free, and it avoids showing "unavailable" for the full 600s on an account
+   that may already be answering normally again.
    A transient non-429 failure (timeout, 5xx, bad JSON) also keeps serving the
    last known good cache, flagged stale; an **auth** error does not, so a
    revoked login surfaces instead of hiding behind a number that can no longer
@@ -318,6 +324,7 @@ is no guessing.
 | `--min-refresh` | `OPENCODE_QUOTA_MIN_REFRESH_MS` | `minRefreshIntervalMs` | `120000` | Minimum spacing between real quota fetches per provider/window (ms). |
 | `--rate-limit-backoff` | `OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS` | `rateLimitBackoffMs` | `300000` | Extra cooldown after a 429 / rate-limit response that sends no `Retry-After` (ms). |
 | `--max-rate-limit-backoff` | `OPENCODE_QUOTA_MAX_RATE_LIMIT_BACKOFF_MS` | `maxRateLimitBackoffMs` | `600000` | Upper bound on a 429's server-sent `Retry-After` (ms). Does not cap `--rate-limit-backoff`. |
+| `--no-baseline-rate-limit-backoff` | `OPENCODE_QUOTA_NO_BASELINE_RATE_LIMIT_BACKOFF_MS` | `noBaselineRateLimitBackoffMs` | `60000` | Tighter cap used instead of `--max-rate-limit-backoff` when there is no last-known-good reading to serve through the backoff (ms). |
 | `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*`, falling back to `~/.claude`)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
 | `--openai-accounts-file` | `OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE` | `openaiAccountsFile` | *(auto: `~/.opencode/oc-codex-multi-auth-accounts.json`)* | Path to a multi-account OpenAI/Codex store. |
 

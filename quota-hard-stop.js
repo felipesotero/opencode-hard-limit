@@ -94,6 +94,7 @@ async function refreshQuota(
     cacheTtlMs: cfg.cacheTtlMs,
     rateLimitBackoffMs: cfg.rateLimitBackoffMs,
     maxRateLimitBackoffMs: cfg.maxRateLimitBackoffMs,
+    noBaselineRateLimitBackoffMs: cfg.noBaselineRateLimitBackoffMs,
     minRefreshIntervalMs: cfg.minRefreshIntervalMs,
     accountsFile: cfg.anthropicAccountsFile,
     credentialSource: cfg.anthropicCredentialSource,

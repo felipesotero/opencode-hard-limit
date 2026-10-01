@@ -350,6 +350,47 @@ test("no Retry-After falls back to rateLimitBackoffMs, uncapped by maxRateLimitB
   });
 });
 
+test("429 without LKG is capped by noBaselineRateLimitBackoffMs, tighter than maxRateLimitBackoffMs", async () => {
+  // Nothing is being protected when there is no last-known-good reading yet,
+  // so a long server Retry-After should be clamped much sooner than the
+  // (looser) cap that applies once a stale-but-good value exists to serve.
+  await withStubbedUsage({ respond: rateLimited("3600") }, async ({ cacheFile }) => {
+    const result = await readWeekly({
+      provider: "anthropic",
+      window: "Weekly",
+      cacheFile,
+      cacheTtlMs: 500,
+      minRefreshIntervalMs: 500,
+      rateLimitBackoffMs: 30_000,
+      maxRateLimitBackoffMs: 600_000,
+      noBaselineRateLimitBackoffMs: 45_000,
+      timeoutMs: 1000,
+    });
+    assert.equal(result.errorKind, "ratelimit");
+    assert.equal(result.backoffUntil, 46_000); // now(1_000) + no-baseline cap, not + maxRateLimitBackoffMs
+    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"].nextAllowedAt, 46_000);
+  });
+});
+
+test("noBaselineRateLimitBackoffMs never loosens maxRateLimitBackoffMs when no LKG exists", async () => {
+  // A no-baseline cap set LARGER than maxRateLimitBackoffMs must not widen
+  // the backoff window — maxRateLimitBackoffMs still wins via Math.min.
+  await withStubbedUsage({ respond: rateLimited("3600") }, async ({ cacheFile }) => {
+    const result = await readWeekly({
+      provider: "anthropic",
+      window: "Weekly",
+      cacheFile,
+      cacheTtlMs: 500,
+      minRefreshIntervalMs: 500,
+      rateLimitBackoffMs: 30_000,
+      maxRateLimitBackoffMs: 60_000,
+      noBaselineRateLimitBackoffMs: 500_000,
+      timeoutMs: 1000,
+    });
+    assert.equal(result.backoffUntil, 61_000); // now(1_000) + maxRateLimitBackoffMs, not + 500_000
+  });
+});
+
 test("a transient non-429 failure serves the last-known-good as stale", async () => {
   let calls = 0;
   const respond = async () => {
