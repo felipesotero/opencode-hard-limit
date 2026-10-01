@@ -29,6 +29,8 @@ import {
   cleanupLegacyCopies,
 } from "../lib/deploy.js";
 
+import { askToStarRepo } from "../lib/star.js";
+
 import {
   writePostpone,
   readPostpone,
@@ -65,6 +67,18 @@ async function promptScope() {
   rl.close();
   if (answer === "2" || answer.toLowerCase() === "project") return "project";
   return "global";
+}
+
+// Yes/no prompt for askToStarRepo(). Mirrors promptScope()'s readline use; the
+// caller has already established we're on a TTY.
+async function confirmYes(message) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(`${message} (Y/n) `)).trim().toLowerCase();
+    return answer === "" || answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
 }
 
 function resolveScopeFlag(values) {
@@ -112,6 +126,7 @@ const SHARED_OPTIONS = {
   "allow-postpone": { type: "string" },
   clear: { type: "boolean" },
   install: { type: "boolean" },
+  "no-star": { type: "boolean" },
   help: { type: "boolean", short: "h" },
 };
 
@@ -341,6 +356,10 @@ Usage:
   opencode-hard-limit install
   opencode-hard-limit uninstall
 
+Install/init also ask once whether to star the repo on GitHub (needs an
+authenticated 'gh'). Skip it with --no-star, OPENCODE_QUOTA_NO_STAR=1, or any
+non-interactive run.
+
 Scope:
   --global    apply to all OpenCode projects (~/.config/opencode/opencode-hard-limit/config.json)
   --project   apply to the current directory only (./.opencode-hard-limit.json)
@@ -388,6 +407,7 @@ async function main() {
 
   if (cmd === "install") {
     installPlugin();
+    await askToStarRepo({ pkgRoot: PKG_ROOT, noStar: values["no-star"], confirm: confirmYes, print });
     return;
   }
 
@@ -423,6 +443,7 @@ async function main() {
     }
     print("");
     print("Verify effective config with: opencode-hard-limit get");
+    await askToStarRepo({ pkgRoot: PKG_ROOT, noStar: values["no-star"], confirm: confirmYes, print });
     return;
   }
 
