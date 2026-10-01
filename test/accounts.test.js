@@ -34,6 +34,16 @@ function writeCredentials(dir) {
   writeFileSync(join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok" } }), "utf8");
 }
 
+// Credentials carrying a refresh token, which is what identifies a login.
+function writeCredentialsWithRefresh(dir, refreshToken) {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "tok", refreshToken } }),
+    "utf8",
+  );
+}
+
 // ---------------------------------------------------------------------------
 // discoverAnthropicAccounts
 // ---------------------------------------------------------------------------
@@ -80,18 +90,33 @@ test("discoverAnthropicAccounts: nonexistent profileDirs entries are ignored, ne
   assert.deepEqual(accounts, []);
 });
 
-test("discoverAnthropicAccounts: default convention scans ~/.claude-profiles/* then ~/.claude last", () => {
+test("discoverAnthropicAccounts: default convention scans ~/.claude-profiles/*, ignoring ~/.claude", () => {
   const home = sandbox();
   writeCredentials(join(home, ".claude-profiles", "max"));
   writeCredentials(join(home, ".claude-profiles", "pro"));
-  writeCredentials(join(home, ".claude"));
+  // A distinct leftover login in the bare default dir: nothing routes to it
+  // once named profiles exist, so polling it only burns the usage endpoint's
+  // rate limit.
+  writeCredentialsWithRefresh(join(home, ".claude"), "refresh-leftover");
 
   withEnv({ HOME: home }, () => {
     const accounts = discoverAnthropicAccounts();
-    // Profiles are read in directory-name sort order (max, pro), the bare
-    // default dir is always appended last regardless of alphabetical order.
-    assert.deepEqual(accounts.map((a) => a.id), ["max", "pro", "default"]);
-    assert.deepEqual(accounts.map((a) => a.label), ["Claude Max", "Claude Pro", "Claude (default)"]);
+    // Profiles are read in directory-name sort order (max, pro).
+    assert.deepEqual(accounts.map((a) => a.id), ["max", "pro"]);
+    assert.deepEqual(accounts.map((a) => a.label), ["Claude Max", "Claude Pro"]);
+  });
+});
+
+test("discoverAnthropicAccounts: a profiles dir holding no credentials still falls back to ~/.claude", () => {
+  const home = sandbox();
+  // Mirrors a real setup where ~/.claude-profiles has stray entries (e.g. a
+  // `pro.lock` dir) but no actual profile: the fallback must key off accounts
+  // found, not dirs scanned.
+  mkdirSync(join(home, ".claude-profiles", "pro.lock"), { recursive: true });
+  writeCredentials(join(home, ".claude"));
+
+  withEnv({ HOME: home }, () => {
+    assert.deepEqual(discoverAnthropicAccounts().map((a) => a.id), ["default"]);
   });
 });
 
@@ -109,6 +134,30 @@ test("discoverAnthropicAccounts: no profiles dir and no default credentials -> [
   const home = sandbox();
   withEnv({ HOME: home }, () => {
     assert.deepEqual(discoverAnthropicAccounts(), []);
+  });
+});
+
+test("discoverAnthropicAccounts: two named profiles sharing one login collapse to the first", () => {
+  const home = sandbox();
+  writeCredentialsWithRefresh(join(home, ".claude-profiles", "max"), "refresh-same");
+  writeCredentialsWithRefresh(join(home, ".claude-profiles", "pro"), "refresh-same");
+
+  withEnv({ HOME: home }, () => {
+    assert.deepEqual(discoverAnthropicAccounts().map((a) => a.id), ["max"]);
+  });
+});
+
+test("discoverAnthropicAccounts: credentials without a readable refresh token are never deduped", () => {
+  const home = sandbox();
+  // Refresh-less or unparseable credentials must stay distinct accounts rather
+  // than collapsing into one on a shared null identity.
+  writeCredentials(join(home, ".claude-profiles", "max"));
+  writeCredentials(join(home, ".claude-profiles", "pro"));
+  mkdirSync(join(home, ".claude-profiles", "work"), { recursive: true });
+  writeFileSync(join(home, ".claude-profiles", "work", ".credentials.json"), "{ not json", "utf8");
+
+  withEnv({ HOME: home }, () => {
+    assert.deepEqual(discoverAnthropicAccounts().map((a) => a.id), ["max", "pro", "work"]);
   });
 });
 
