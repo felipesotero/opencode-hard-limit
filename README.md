@@ -121,9 +121,15 @@ Before every model request, on OpenCode's `chat.params` hook:
    still guarded.
 4. Refresh quota mostly when the agent goes idle (`session.status=idle` /
    `session.idle`), spaced by `minRefreshIntervalMs` (default 120s).
-5. If a refresh gets a 429 / rate-limit response, back off for
-   `rateLimitBackoffMs` (default 300s) and keep serving the last known good
-   cache.
+5. If a refresh gets a 429 / rate-limit response, back off for the response's
+   `Retry-After` when it sends one — capped at `maxRateLimitBackoffMs`
+   (default 600s), since Anthropic's usage endpoint can ask for the better part
+   of an hour — otherwise for `rateLimitBackoffMs` (default 300s). Either way,
+   keep serving the last known good cache.
+   A transient non-429 failure (timeout, 5xx, bad JSON) also keeps serving the
+   last known good cache, flagged stale; an **auth** error does not, so a
+   revoked login surfaces instead of hiding behind a number that can no longer
+   be refreshed.
 6. If `percentRemaining < threshold`, throw and block the call.
 7. If quota **cannot be verified** (timeout, error, bad JSON, missing window),
    block by default. This is a fail-safe you can flip off with
@@ -229,7 +235,11 @@ It just reads their on-disk storage format if present:
   discovered automatically. The hard-stop gate also resolves the **correct**
   account per call: a request through the `claude-pro` provider checks the
   `pro` profile's quota, `claude-max` checks `max` — they no longer share one
-  cache entry / one credential.
+  cache entry / one credential. The bare `~/.claude` is used only when no named
+  profile is found: alongside profiles it is a leftover login nothing routes to,
+  and polling it would spend the usage endpoint's rate limit on a quota no model
+  call consumes. Two dirs holding the same login (a copied profile) collapse to
+  one account for the same reason.
 - **OpenAI/Codex** — if a multi-account manager such as
   [`oc-codex-multi-auth`](https://github.com/ndycode/oc-codex-multi-auth) is
   installed, its account store (default
@@ -306,8 +316,9 @@ is no guessing.
 | `--cache-ttl` | `OPENCODE_QUOTA_CACHE_TTL_MS` | `cacheTtlMs` | `60000` | In-memory cache TTL per provider (ms). |
 | `--timeout` | `OPENCODE_QUOTA_TIMEOUT_MS` | `timeoutMs` | `20000` | Max wait for a quota check (ms). |
 | `--min-refresh` | `OPENCODE_QUOTA_MIN_REFRESH_MS` | `minRefreshIntervalMs` | `120000` | Minimum spacing between real quota fetches per provider/window (ms). |
-| `--rate-limit-backoff` | `OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS` | `rateLimitBackoffMs` | `300000` | Extra cooldown after a 429 / rate-limit response (ms). |
-| `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*` + `~/.claude`)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
+| `--rate-limit-backoff` | `OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS` | `rateLimitBackoffMs` | `300000` | Extra cooldown after a 429 / rate-limit response that sends no `Retry-After` (ms). |
+| `--max-rate-limit-backoff` | `OPENCODE_QUOTA_MAX_RATE_LIMIT_BACKOFF_MS` | `maxRateLimitBackoffMs` | `600000` | Upper bound on a 429's server-sent `Retry-After` (ms). Does not cap `--rate-limit-backoff`. |
+| `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*`, falling back to `~/.claude`)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
 | `--openai-accounts-file` | `OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE` | `openaiAccountsFile` | *(auto: `~/.opencode/oc-codex-multi-auth-accounts.json`)* | Path to a multi-account OpenAI/Codex store. |
 
 Sidebar polling:
