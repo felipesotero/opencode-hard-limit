@@ -23,6 +23,8 @@
     "lib/evaluate.js",
     "lib/accounts.js",
     "lib/claude-warm.js",
+    "lib/warm-schedule.js",
+    "lib/warm-watch.js",
     "lib/postpone.js",
     "lib/reset.js",
     "lib/star.js",

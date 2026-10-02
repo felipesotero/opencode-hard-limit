@@ -26,6 +26,9 @@ import { readAccountsWeekly } from "../lib/quota.js";
 
 import { warmClaudeAccounts, findClaudeBinary, DEFAULT_WARM_MODEL } from "../lib/claude-warm.js";
 
+import { tickWarmSchedule } from "../lib/warm-watch.js";
+import { DEFAULT_IDLE_INTERVAL_MS, DEFAULT_POST_RESET_BUFFER_MS } from "../lib/warm-schedule.js";
+
 import {
   configDir,
   pluginsDir,
@@ -140,6 +143,9 @@ const SHARED_OPTIONS = {
   "openai-accounts-file": { type: "string" },
   model: { type: "string" },
   "warm-timeout": { type: "string" },
+  watch: { type: "boolean" },
+  "idle-interval": { type: "string" },
+  "post-reset-buffer": { type: "string" },
   clear: { type: "boolean" },
   install: { type: "boolean" },
   "no-star": { type: "boolean" },
@@ -415,6 +421,11 @@ async function accountsCommand(values) {
 // actually using that profile right now. See lib/claude-warm.js for why
 // this is necessary: the quota-read path never refreshes a token itself.
 async function warmCommand(values) {
+  if (values.watch) {
+    await warmWatchCommand(values);
+    return;
+  }
+
   const asJson = Boolean(values.json);
   const cfg = resolveConfig({ projectDir: process.cwd() }).values;
   const cliPath = findClaudeBinary();
@@ -459,6 +470,73 @@ async function warmCommand(values) {
   }
 }
 
+const WATCH_SLEEP_CHUNK_MS = 30_000;
+
+/** Sleeps up to ms, in chunks, so SIGINT/SIGTERM are noticed promptly rather than after a possibly 76-minute wait. */
+async function sleepInterruptible(ms, isStopped) {
+  let remaining = ms;
+  while (remaining > 0 && !isStopped()) {
+    const chunk = Math.min(WATCH_SLEEP_CHUNK_MS, remaining);
+    await new Promise((resolve) => setTimeout(resolve, chunk));
+    remaining -= chunk;
+  }
+}
+
+// Adaptive, signal-driven alternative to running `warm` on a fixed interval:
+// each account is warmed or skipped per tick based on two signals --
+//   - exhausted: the window is at 0% with a known reset time -> sleep until
+//     just past that reset instead of polling idly in between;
+//   - in-use: the credentials file changed since the last tick (something
+//     real refreshed the token elsewhere) -> skip, nothing to do;
+// otherwise the account is idle and spendable, so it's warmed, and the next
+// check happens after --idle-interval (default 10 min). See
+// lib/warm-schedule.js for the (pure, unit-tested) decision logic.
+async function warmWatchCommand(values) {
+  const cfg = resolveConfig({ projectDir: process.cwd() }).values;
+  const cliPath = findClaudeBinary();
+  if (!cliPath) {
+    fail("claude CLI not found on PATH or ~/.local/bin. Install it first (https://claude.ai/code).");
+  }
+
+  const model = values.model || DEFAULT_WARM_MODEL;
+  const window = windowForProvider(cfg, "anthropic");
+  const idleIntervalMs = values["idle-interval"] !== undefined ? Number(values["idle-interval"]) : DEFAULT_IDLE_INTERVAL_MS;
+  const postResetBufferMs = values["post-reset-buffer"] !== undefined ? Number(values["post-reset-buffer"]) : DEFAULT_POST_RESET_BUFFER_MS;
+
+  let stopped = false;
+  const stop = () => { stopped = true; };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  print(`Watching Claude accounts (window: ${window}, idle interval: ${Math.round(idleIntervalMs / 60000)}min). Ctrl+C to stop.`);
+
+  const state = new Map();
+  while (!stopped) {
+    const { results, nextTickAt } = await tickWarmSchedule({
+      cliPath, model, window, idleIntervalMs, postResetBufferMs,
+      profileDirs: cfg.anthropicProfileDirs, state,
+    });
+
+    const ts = new Date().toLocaleTimeString();
+    if (results.length === 0) {
+      print(`[${ts}] No Claude accounts discovered.`);
+    }
+    for (const r of results) {
+      const nextAt = new Date(r.nextCheckAt).toLocaleTimeString();
+      if (r.action === "warm") {
+        const status = r.warmResult?.ok ? "warmed" : `failed (${r.warmResult?.error ?? "unknown error"})`;
+        print(`[${ts}] ${r.label}: ${status} — next check ~${nextAt}`);
+      } else {
+        print(`[${ts}] ${r.label}: skipped (${r.reason}) — next check ~${nextAt}`);
+      }
+    }
+
+    if (stopped) break;
+    await sleepInterruptible(Math.max(0, nextTickAt - Date.now()), () => stopped);
+  }
+  print("Stopped.");
+}
+
 function postponeCommand(values, positionals) {
   const cfg = resolveConfig({ projectDir: process.cwd() }).values;
   if (!cfg.allowPostpone) {
@@ -496,6 +574,7 @@ Usage:
   opencode-hard-limit get
   opencode-hard-limit accounts [--json]       show quota for every discovered Claude/OpenAI account
   opencode-hard-limit warm [--model m] [--json]  force a real, minimal call per Claude account to refresh its OAuth token
+  opencode-hard-limit warm --watch               adaptive loop: warm when idle, skip when in-use or exhausted (see below)
   opencode-hard-limit postpone [minutes]      postpone a block for N minutes (default ${DEFAULT_POSTPONE_MINUTES}; requires --allow-postpone)
   opencode-hard-limit postpone --clear        cancel an active postpone early
   opencode-hard-limit install
@@ -545,12 +624,26 @@ Warm (optional; needs the real \`claude\` CLI on PATH, not just a quota read):
     --model m         model alias/name to warm with (default: ${DEFAULT_WARM_MODEL})
     --warm-timeout ms per-account spawn timeout (default: 30000)
 
+  'warm --watch' runs that same call on an adaptive, signal-driven schedule
+  instead of once: per account, per tick, it skips rather than warms when
+  either signal says there's no point --
+    - exhausted: window is at 0% with a known reset time -> sleeps until just
+      past that reset (e.g. 75min left on the window -> next check in ~76min)
+      instead of polling idly in between.
+    - in-use: the credentials file changed since the last tick (something
+      real already refreshed the token elsewhere) -> skips, nothing to do.
+  Otherwise the account is idle and spendable, so it warms it, then checks
+  again after --idle-interval. Runs until Ctrl+C.
+    --idle-interval ms     re-check cadence while idle (default: ${DEFAULT_IDLE_INTERVAL_MS})
+    --post-reset-buffer ms extra wait added past a known reset time (default: ${DEFAULT_POST_RESET_BUFFER_MS})
+
 Examples:
   opencode-hard-limit init --global --threshold 30 --install
   opencode-hard-limit set --threshold 30 --global
   opencode-hard-limit get
   opencode-hard-limit accounts
   opencode-hard-limit warm
+  opencode-hard-limit warm --watch
   opencode-hard-limit set --allow-postpone true --global
   opencode-hard-limit postpone 60`);
 }
