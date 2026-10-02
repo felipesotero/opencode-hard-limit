@@ -248,6 +248,72 @@ test("chat.params: windowFallback result still blocks when below threshold", asy
   }
 });
 
+test("chat.params: claude-pro and claude-max resolve to SEPARATE accounts/cache keys (regression for the shared-credential bug)", async () => {
+  const { root, xdg, proj } = sandbox();
+  const proDir = join(root, "profiles", "pro");
+  const maxDir = join(root, "profiles", "max");
+  mkdirSync(proDir, { recursive: true });
+  mkdirSync(maxDir, { recursive: true });
+  writeFileSync(join(proDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }));
+  writeFileSync(join(maxDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({ anthropicProfileDirs: [proDir, maxDir] }));
+
+  __test__.clearState();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg }, async () => {
+      const calls = [];
+      __test__.setQuotaReader(async (args) => {
+        calls.push(args);
+        return okResult(80);
+      });
+
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
+
+      await plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } });
+      await plugin["chat.params"]({ provider: { info: { id: "claude-max" } } });
+
+      const proCall = calls.find((c) => c.accountId === "pro");
+      const maxCall = calls.find((c) => c.accountId === "max");
+      assert.ok(proCall, "expected a quotaReader call for the pro account");
+      assert.ok(maxCall, "expected a quotaReader call for the max account");
+
+      assert.ok(__test__.seenKeys.has("anthropic:pro:5h"), "expected a distinct cache key for the pro account");
+      assert.ok(__test__.seenKeys.has("anthropic:max:5h"), "expected a distinct cache key for the max account");
+    });
+  } finally {
+    __test__.resetQuotaReader();
+    __test__.clearState();
+  }
+});
+
+test("chat.params: a generic 'anthropic' provider id keeps the legacy shared cache key even when profiles exist", async () => {
+  const { root, xdg, proj } = sandbox();
+  const proDir = join(root, "profiles", "pro");
+  mkdirSync(proDir, { recursive: true });
+  writeFileSync(join(proDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "x" } }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({ anthropicProfileDirs: [proDir] }));
+
+  __test__.clearState();
+  try {
+    await withEnv({ XDG_CONFIG_HOME: xdg }, async () => {
+      const calls = [];
+      __test__.setQuotaReader(async (args) => {
+        calls.push(args);
+        return okResult(80);
+      });
+
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
+      await plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
+
+      assert.equal(calls[0].accountId, undefined);
+      assert.ok(__test__.seenKeys.has("anthropic:5h"));
+    });
+  } finally {
+    __test__.resetQuotaReader();
+    __test__.clearState();
+  }
+});
+
 test("active postpone suppresses an otherwise-blocking result when allowPostpone is enabled", async () => {
   const { xdg, proj } = sandbox();
   writeFileSync(

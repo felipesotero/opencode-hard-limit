@@ -76,6 +76,11 @@ function fakePkgRoot(dir, tsxContent = "// fake sidebar\nexport default function
     "// lib/postpone.js\nexport function isPostponeActive() { return false; }",
     "utf8",
   );
+  writeFileSync(
+    join(dir, "lib", "accounts.js"),
+    "// lib/accounts.js\nexport function discoverAnthropicAccounts() { return []; }\nexport function discoverOpenAIAccounts() { return null; }",
+    "utf8",
+  );
   return dir;
 }
 
@@ -136,6 +141,10 @@ test("ensureTuiDeployed: deploys lib/quota.js, lib/config.js, lib/reset.js, and 
     assert.ok(
       existsSync(join(plugins, "lib", "postpone.js")),
       "lib/postpone.js should be deployed into plugins/lib/ (sidebar imports it for the postpone hint)",
+    );
+    assert.ok(
+      existsSync(join(plugins, "lib", "accounts.js")),
+      "lib/accounts.js should be deployed into plugins/lib/ (sidebar imports it for multi-account discovery)",
     );
     // Verify bytes match the source.
     const srcQuota = readFileSync(join(pkg, "lib", "quota.js"));

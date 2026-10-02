@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { evaluate, resolveQuotaProvider } from "../lib/evaluate.js";
+import { evaluate, resolveQuotaProvider, resolveAnthropicProfileSlug } from "../lib/evaluate.js";
 
 const CFG = { minRemaining: 30, blockOnError: true, blockOnAuthError: false, cacheTtlMs: 60000, timeoutMs: 20000, minRefreshIntervalMs: 120000, staleBlockMarginPct: 10 };
 
@@ -31,6 +31,20 @@ test("provider mapping", () => {
   assert.equal(resolveQuotaProvider("codex"), "openai");
   assert.equal(resolveQuotaProvider("github-copilot"), null);
   assert.equal(resolveQuotaProvider(undefined), null);
+});
+
+test("resolveAnthropicProfileSlug: extracts the slug from a claude-<slug> provider id", () => {
+  assert.equal(resolveAnthropicProfileSlug("claude-pro"), "pro");
+  assert.equal(resolveAnthropicProfileSlug("claude-max"), "max");
+  assert.equal(resolveAnthropicProfileSlug("CLAUDE-Max"), "max");
+  assert.equal(resolveAnthropicProfileSlug("claude-work-2"), "work-2");
+});
+
+test("resolveAnthropicProfileSlug: null for the generic id or anything else", () => {
+  assert.equal(resolveAnthropicProfileSlug("anthropic"), null);
+  assert.equal(resolveAnthropicProfileSlug("claude"), null);
+  assert.equal(resolveAnthropicProfileSlug("openai"), null);
+  assert.equal(resolveAnthropicProfileSlug(undefined), null);
 });
 
 test("allows when weekly remaining >= threshold", () => {

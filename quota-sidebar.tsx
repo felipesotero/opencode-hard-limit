@@ -3,7 +3,7 @@ import { RGBA } from "@opentui/core";
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui";
 import { createSignal, onCleanup, onMount } from "solid-js";
 
-import { MONITORED_PROVIDERS, readWeekly, quotaCachePath } from "./lib/quota.js";
+import { MONITORED_PROVIDERS, readAccountsWeekly, quotaCachePath } from "./lib/quota.js";
 import { resolveConfig, windowForProvider } from "./lib/config.js";
 import { formatReset } from "./lib/reset.js";
 import { isPostponeActive, DEFAULT_POSTPONE_MINUTES } from "./lib/postpone.js";
@@ -35,11 +35,28 @@ type WeeklyQuotaResult = {
   receivedAt?: number;
 };
 
-type QuotaSnapshot = WeeklyQuotaResult & {
-  receivedAt: number;
+// One entry per discovered account (or a single synthetic "default" entry
+// when no multi-account store is found for that provider) — see
+// lib/quota.js's readAccountsWeekly() and lib/accounts.js.
+type AccountQuotaResult = WeeklyQuotaResult & {
+  accountId: string;
+  accountLabel: string;
+  isActive: boolean;
 };
 
+type QuotaSnapshot = WeeklyQuotaResult & {
+  receivedAt: number;
+  accountLabel: string;
+  isActive: boolean;
+};
+
+// Keyed by `${providerId}:${accountId}` so pro/max/multiple-OpenAI-accounts
+// each hold their own independent signal slot.
 type QuotaMap = Record<string, QuotaSnapshot | undefined>;
+
+function rowKey(providerId: string, accountId: string): string {
+  return `${providerId}:${accountId}`;
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -77,7 +94,7 @@ function safeWindowFor(projectDir: string, providerId: string): string {
   }
 }
 
-function normalizeResult(result: WeeklyQuotaResult): QuotaSnapshot {
+function normalizeResult(result: AccountQuotaResult): QuotaSnapshot {
   const receivedAt = typeof result.receivedAt === "number" ? result.receivedAt : Date.now();
   return {
     ...result,
@@ -85,8 +102,9 @@ function normalizeResult(result: WeeklyQuotaResult): QuotaSnapshot {
   };
 }
 
-function errorSnapshot(message?: string): QuotaSnapshot {
+function errorSnapshot(result: AccountQuotaResult, message?: string): QuotaSnapshot {
   return normalizeResult({
+    ...result,
     ok: false,
     status: "error",
     remaining: null,
@@ -153,50 +171,66 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
     try {
       await Promise.all(
         MONITORED_PROVIDERS.map(async (provider) => {
-          let next: QuotaSnapshot;
+          let results: AccountQuotaResult[];
 
           try {
-            const result = (await readWeekly({
+            results = (await readAccountsWeekly({
               provider: provider.id,
               window: windows[provider.id],
               timeoutMs: READ_TIMEOUT_MS,
               cacheTtlMs: cfg.cacheTtlMs,
               minRefreshIntervalMs: cfg.minRefreshIntervalMs,
               rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+              maxRateLimitBackoffMs: cfg.maxRateLimitBackoffMs,
+              noBaselineRateLimitBackoffMs: cfg.noBaselineRateLimitBackoffMs,
               cacheFile: quotaCachePath(),
-            })) as WeeklyQuotaResult;
-            next = result.status === "ok" ? normalizeResult(result) : errorSnapshot(result.error ?? "quota unavailable");
+              anthropicProfileDirs: cfg.anthropicProfileDirs,
+              openaiAccountsFile: cfg.openaiAccountsFile,
+            })) as AccountQuotaResult[];
           } catch (error) {
-            next = errorSnapshot(error instanceof Error ? error.message : "quota unavailable");
+            results = [
+              {
+                ok: false,
+                status: "error",
+                remaining: null,
+                resetAt: null,
+                unlimited: false,
+                error: error instanceof Error ? error.message : "quota unavailable",
+                accountId: "default",
+                accountLabel: provider.label,
+                isActive: true,
+              },
+            ];
           }
 
           if (props.api.lifecycle.signal.aborted) return;
 
           setSnapshot((current) => {
-            const previous = current[provider.id];
-            if (next.status === "error" && previous?.status === "ok") {
-              return {
-                ...current,
-                [provider.id]: {
-                  ...previous,
-                  stale: true,
-                },
-              };
+            const next = { ...current };
+            for (const result of results) {
+              const key = rowKey(provider.id, result.accountId);
+              const normalized =
+                result.status === "ok" ? normalizeResult(result) : errorSnapshot(result, result.error ?? "quota unavailable");
+
+              const previous = next[key];
+              if (normalized.status === "error" && previous?.status === "ok") {
+                next[key] = { ...previous, stale: true };
+                continue;
+              }
+
+              // quotaWindow is fixed per mount so a mismatch is currently unreachable;
+              // guard is defensive against TUI reload/config-change semantics we don't control.
+              const carriedResetAt =
+                normalized.status === "ok" &&
+                (normalized.resetAt === null || normalized.resetAt === undefined) &&
+                hasResetAt(previous) &&
+                previous.window === normalized.window
+                  ? previous.resetAt
+                  : normalized.resetAt;
+
+              next[key] = { ...normalized, resetAt: carriedResetAt };
             }
-
-            // quotaWindow is fixed per mount so a mismatch is currently unreachable;
-            // guard is defensive against TUI reload/config-change semantics we don't control.
-            const carriedResetAt = next.status === "ok" && (next.resetAt === null || next.resetAt === undefined) && hasResetAt(previous) && previous.window === next.window
-              ? previous.resetAt
-              : next.resetAt;
-
-            return {
-              ...current,
-              [provider.id]: {
-                ...next,
-                resetAt: carriedResetAt,
-              },
-            };
+            return next;
           });
         }),
       );
@@ -222,25 +256,44 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
     if (interval) clearInterval(interval);
   });
 
-  const providerStates = () =>
-    MONITORED_PROVIDERS.map((provider) => ({
-      provider,
-      state: snapshot()[provider.id],
-    }));
+  // Flatten the snapshot map into a stable, provider-ordered list of rows —
+  // one row per discovered account. Ordering: MONITORED_PROVIDERS order
+  // first (Claude before OpenAI), then account id within a provider.
+  const rows = () => {
+    const map = snapshot();
+    const providerOrder = MONITORED_PROVIDERS.map((p) => p.id);
+    return Object.keys(map)
+      .filter((key) => Boolean(map[key]))
+      .sort((a, b) => {
+        const pa = a.slice(0, a.indexOf(":"));
+        const pb = b.slice(0, b.indexOf(":"));
+        const oa = providerOrder.indexOf(pa);
+        const ob = providerOrder.indexOf(pb);
+        if (oa !== ob) return oa - ob;
+        return a.localeCompare(b);
+      })
+      .map((key) => ({ key, providerId: key.slice(0, key.indexOf(":")), state: map[key]! }));
+  };
 
-  const hasAnyResult = () => providerStates().some(({ state }) => Boolean(state));
-  const renderableProviders = () => providerStates().filter(({ state }) => Boolean(state));
+  // Only tag a row "(active)" when its provider actually has more than one
+  // account — the trivial single/"default" account case stays unlabeled, as
+  // before this feature existed.
+  const providerRowCounts = () => {
+    const counts: Record<string, number> = {};
+    for (const { providerId } of rows()) counts[providerId] = (counts[providerId] ?? 0) + 1;
+    return counts;
+  };
+
+  const hasAnyResult = () => rows().length > 0;
   const shouldShowChecking = () => !hasAnyResult();
 
-  const isProviderBlocked = (state: QuotaSnapshot | undefined) => {
+  const isRowBlocked = (state: QuotaSnapshot | undefined) => {
     if (!state || state.unlimited === true) return false;
     const remainingValue = typeof state.remaining === "number" ? clamp(state.remaining, 0, 100) : null;
     return typeof remainingValue === "number" && remainingValue <= minRemaining;
   };
   const showPostponeHint = () =>
-    cfg.allowPostpone === true &&
-    !isPostponeActive() &&
-    providerStates().some(({ state }) => isProviderBlocked(state));
+    cfg.allowPostpone === true && !isPostponeActive() && rows().some(({ state }) => isRowBlocked(state));
 
   return (
     <box gap={1} flexDirection="column">
@@ -256,92 +309,95 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
             checking...
           </text>
         ) : (
-          renderableProviders().map(({ provider, state }) => {
-            const unlimited = state?.unlimited === true;
+          (() => {
+            const counts = providerRowCounts();
+            return rows().map(({ key, providerId, state }) => {
+              const unlimited = state?.unlimited === true;
+              const showActiveTag = state.isActive && (counts[providerId] ?? 0) > 1;
+              const label = showActiveTag ? `${state.accountLabel} (active)` : state.accountLabel;
 
-            if (state?.status === "error" && !unlimited) {
-              const warnTone = theme.warning ?? theme.error;
-              const reason =
-                typeof state?.error === "string" && state.error.trim() ? state.error : "unavailable";
+              if (state?.status === "error" && !unlimited) {
+                const warnTone = theme.warning ?? theme.error;
+                const reason = typeof state?.error === "string" && state.error.trim() ? state.error : "unavailable";
+                return (
+                  <box flexDirection="column">
+                    <text fg={theme.text} wrapMode="none">
+                      <b>{label}</b>
+                    </text>
+                    <text fg={warnTone} wrapMode="wrap">
+                      {`unavailable (${reason})`}
+                    </text>
+                  </box>
+                );
+              }
+              const remainingValue = typeof state?.remaining === "number" ? clamp(state.remaining, 0, 100) : null;
+              const blocked = typeof remainingValue === "number" && remainingValue <= minRemaining;
+              const tone = unlimited
+                ? theme.success
+                : remainingValue === null
+                  ? theme.textMuted
+                  : gradientTone(theme, remainingValue, minRemaining);
+              const stateText = unlimited
+                ? "unlimited"
+                : typeof remainingValue === "number"
+                  ? `${roundPercent(remainingValue)}% left, limit ${roundPercent(minRemaining)}%`
+                  : "quota unavailable";
+              const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
+              const markerTone = blocked ? theme.error : theme.border;
+              const effectiveWindow = state?.window ?? windows[providerId];
+              const resetText = formatReset(state?.resetAt, effectiveWindow);
+              const staleText =
+                state?.stale && Number.isFinite(state.receivedAt) && Date.now() - state.receivedAt > STALE_ANNOTATION_MIN_AGE_MS
+                  ? `· ${formatStaleAge(state.receivedAt)}`
+                  : null;
+
               return (
-                <box flexDirection="column">
-                  <text fg={theme.text} wrapMode="none">
-                    <b>{provider.label}</b>
-                  </text>
-                  <text fg={warnTone} wrapMode="wrap">
-                    {`unavailable (${reason})`}
-                  </text>
+                <box gap={0} flexDirection="column">
+                  <box flexDirection="row">
+                    <text fg={theme.text} wrapMode="none">
+                      <b>{label}</b>
+                    </text>
+                    <text fg={theme.textMuted} wrapMode="none">
+                      {` ${effectiveWindow}`}
+                    </text>
+                    <text fg={tone} wrapMode="none">
+                      {` ${stateText}`}
+                    </text>
+                  </box>
+
+                  {bar ? (
+                    <box gap={0} flexDirection="column">
+                      <box flexDirection="row">
+                        <text fg={tone} wrapMode="none">
+                          {bar.filled}
+                        </text>
+                        <text fg={theme.textMuted} wrapMode="none">
+                          {bar.empty}
+                        </text>
+                      </box>
+                      <box flexDirection="row">
+                        <text fg={markerTone} wrapMode="none">
+                          {bar.marker}
+                        </text>
+                      </box>
+                    </box>
+                  ) : null}
+
+                  {resetText ? (
+                    <text fg={theme.textMuted} wrapMode="none">
+                      {resetText}
+                    </text>
+                  ) : null}
+
+                  {staleText ? (
+                    <text fg={theme.textMuted} wrapMode="none">
+                      {staleText}
+                    </text>
+                  ) : null}
                 </box>
               );
-            }
-            const remainingValue = typeof state?.remaining === "number" ? clamp(state.remaining, 0, 100) : null;
-            const blocked = typeof remainingValue === "number" && remainingValue <= minRemaining;
-            const tone = unlimited
-              ? theme.success
-              : remainingValue === null
-                ? theme.textMuted
-                : gradientTone(theme, remainingValue, minRemaining);
-            const stateText = unlimited
-              ? "unlimited"
-              : typeof remainingValue === "number"
-                ? `${roundPercent(remainingValue)}% left, limit ${roundPercent(minRemaining)}%`
-                : "quota unavailable";
-            const bar = typeof remainingValue === "number" ? buildBar(remainingValue, minRemaining) : null;
-            const markerTone = blocked ? theme.error : theme.border;
-            const effectiveWindow = state?.window ?? windows[provider.id];
-            const resetText = formatReset(state?.resetAt, effectiveWindow);
-            const staleText =
-              state?.stale && Number.isFinite(state.receivedAt) && Date.now() - state.receivedAt > STALE_ANNOTATION_MIN_AGE_MS
-                ? `· ${formatStaleAge(state.receivedAt)}`
-                : null;
-
-            return (
-              <box gap={0} flexDirection="column">
-                <box flexDirection="row">
-                  <text fg={theme.text} wrapMode="none">
-                    <b>{provider.label}</b>
-                  </text>
-                  <text fg={theme.textMuted} wrapMode="none">
-                    {` ${effectiveWindow}`}
-                  </text>
-                  <text fg={tone} wrapMode="none">
-                    {` ${stateText}`}
-                  </text>
-                </box>
-
-                {bar ? (
-                  <box gap={0} flexDirection="column">
-                    <box flexDirection="row">
-                      <text fg={tone} wrapMode="none">
-                        {bar.filled}
-                      </text>
-                      <text fg={theme.textMuted} wrapMode="none">
-                        {bar.empty}
-                      </text>
-                    </box>
-                    <box flexDirection="row">
-                      <text fg={markerTone} wrapMode="none">
-                        {bar.marker}
-                      </text>
-                    </box>
-                  </box>
-                ) : null}
-
-                {resetText ? (
-                  <text fg={theme.textMuted} wrapMode="none">
-                    {resetText}
-                  </text>
-                ) : null}
-
-                {staleText ? (
-                  <text fg={theme.textMuted} wrapMode="none">
-                    {staleText}
-                  </text>
-                ) : null}
-
-              </box>
-            );
-          })
+            });
+          })()
         )}
       </box>
 

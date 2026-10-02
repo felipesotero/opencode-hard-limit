@@ -18,7 +18,15 @@ import {
   globalConfigPath,
   projectConfigPath,
   PROVIDER_WINDOW_KEYS,
+  windowForProvider,
 } from "../lib/config.js";
+
+import { readAccountsWeekly } from "../lib/quota.js";
+
+import { warmClaudeAccounts, findClaudeBinary, DEFAULT_WARM_MODEL } from "../lib/claude-warm.js";
+
+import { tickWarmSchedule } from "../lib/warm-watch.js";
+import { DEFAULT_IDLE_INTERVAL_MS, DEFAULT_POST_RESET_BUFFER_MS } from "../lib/warm-schedule.js";
 
 import {
   configDir,
@@ -86,11 +94,15 @@ function buildPatch(values) {
   if (values["timeout"] !== undefined) patch.timeoutMs = values["timeout"];
   if (values["min-refresh"] !== undefined) patch.minRefreshIntervalMs = values["min-refresh"];
   if (values["rate-limit-backoff"] !== undefined) patch.rateLimitBackoffMs = values["rate-limit-backoff"];
+  if (values["max-rate-limit-backoff"] !== undefined) patch.maxRateLimitBackoffMs = values["max-rate-limit-backoff"];
+  if (values["no-baseline-rate-limit-backoff"] !== undefined) patch.noBaselineRateLimitBackoffMs = values["no-baseline-rate-limit-backoff"];
   if (values["stale-margin"] !== undefined) patch.staleBlockMarginPct = values["stale-margin"];
   if (values.window !== undefined) patch.window = values.window;
   if (values["window-anthropic"] !== undefined) patch.windowAnthropic = values["window-anthropic"];
   if (values["window-openai"] !== undefined) patch.windowOpenai = values["window-openai"];
   if (values["allow-postpone"] !== undefined) patch.allowPostpone = values["allow-postpone"];
+  if (values["anthropic-profile-dirs"] !== undefined) patch.anthropicProfileDirs = values["anthropic-profile-dirs"];
+  if (values["openai-accounts-file"] !== undefined) patch.openaiAccountsFile = values["openai-accounts-file"];
   return patch;
 }
 
@@ -105,13 +117,23 @@ const SHARED_OPTIONS = {
   timeout: { type: "string" },
   "min-refresh": { type: "string" },
   "rate-limit-backoff": { type: "string" },
+  "max-rate-limit-backoff": { type: "string" },
+  "no-baseline-rate-limit-backoff": { type: "string" },
   "stale-margin": { type: "string" },
   window: { type: "string" },
   "window-anthropic": { type: "string" },
   "window-openai": { type: "string" },
   "allow-postpone": { type: "string" },
+  "anthropic-profile-dirs": { type: "string" },
+  "openai-accounts-file": { type: "string" },
+  model: { type: "string" },
+  "warm-timeout": { type: "string" },
+  watch: { type: "boolean" },
+  "idle-interval": { type: "string" },
+  "post-reset-buffer": { type: "string" },
   clear: { type: "boolean" },
   install: { type: "boolean" },
+  json: { type: "boolean" },
   help: { type: "boolean", short: "h" },
 };
 
@@ -280,6 +302,10 @@ function showResolved() {
       print(`  ${key.padEnd(17)} = ${values.window} (inherits window)`);
       continue;
     }
+    if (values[key] === undefined) {
+      print(`  ${key.padEnd(17)} = (not set, auto-detected)`);
+      continue;
+    }
     print(`  ${key.padEnd(17)} = ${String(values[key]).padEnd(8)} (from ${sources[key]})`);
   }
   print("");
@@ -299,6 +325,192 @@ function showResolved() {
       print("Postpone: not active");
     }
   }
+}
+
+// Lists every discovered account per monitored provider with its current
+// quota — one row per Claude profile dir (see lib/accounts.js) and one row
+// per oc-codex-multi-auth-style OpenAI account, or a single "default" row
+// per provider when no multi-account store is found for it.
+async function accountsCommand(values) {
+  const cfg = resolveConfig({ projectDir: process.cwd() }).values;
+  const asJson = Boolean(values.json);
+  const providers = [
+    { id: "anthropic", label: "Claude" },
+    { id: "openai", label: "OpenAI" },
+  ];
+
+  const out = [];
+  for (const provider of providers) {
+    const window = windowForProvider(cfg, provider.id);
+    let results;
+    try {
+      results = await readAccountsWeekly({
+        provider: provider.id,
+        window,
+        timeoutMs: cfg.timeoutMs,
+        cacheTtlMs: cfg.cacheTtlMs,
+        rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+        maxRateLimitBackoffMs: cfg.maxRateLimitBackoffMs,
+        noBaselineRateLimitBackoffMs: cfg.noBaselineRateLimitBackoffMs,
+        minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+        anthropicProfileDirs: cfg.anthropicProfileDirs,
+        openaiAccountsFile: cfg.openaiAccountsFile,
+      });
+    } catch (err) {
+      results = [
+        { ok: false, error: err?.message || String(err), accountId: "default", accountLabel: provider.label, isActive: true },
+      ];
+    }
+    for (const r of results) {
+      out.push({ provider: provider.id, providerLabel: provider.label, window, ...r });
+    }
+  }
+
+  if (asJson) {
+    print(JSON.stringify(out, null, 2));
+    return;
+  }
+
+  for (const provider of providers) {
+    const rows = out.filter((r) => r.provider === provider.id);
+    print(`${provider.label}:`);
+    for (const r of rows) {
+      const tag = r.isActive && rows.length > 1 ? " (active)" : "";
+      if (!r.ok) {
+        print(`  ${r.accountLabel}${tag}: unavailable (${r.error ?? "unknown error"})`);
+        continue;
+      }
+      if (r.unlimited) {
+        print(`  ${r.accountLabel}${tag}: unlimited`);
+        continue;
+      }
+      const resetPart = r.resetAt ? ` (resets ${new Date(r.resetAt).toLocaleString()})` : "";
+      print(`  ${r.accountLabel}${tag}: ${r.remaining}% left, ${r.window} window${resetPart}`);
+    }
+    print("");
+  }
+}
+
+// Forces one minimal, real, authenticated `claude` CLI call per discovered
+// Claude profile (default model: Haiku, the cheapest), so each profile's
+// OAuth access token gets refreshed even when nothing in OpenCode is
+// actually using that profile right now. See lib/claude-warm.js for why
+// this is necessary: the quota-read path never refreshes a token itself.
+async function warmCommand(values) {
+  if (values.watch) {
+    await warmWatchCommand(values);
+    return;
+  }
+
+  const asJson = Boolean(values.json);
+  const cfg = resolveConfig({ projectDir: process.cwd() }).values;
+  const cliPath = findClaudeBinary();
+
+  if (!cliPath) {
+    const message = "claude CLI not found on PATH or ~/.local/bin. Install it first (https://claude.ai/code).";
+    if (asJson) {
+      print(JSON.stringify({ ok: false, error: message }));
+      return;
+    }
+    fail(message);
+  }
+
+  const model = values.model || DEFAULT_WARM_MODEL;
+  const timeoutMs = values["warm-timeout"] !== undefined ? Number(values["warm-timeout"]) : undefined;
+
+  const results = await warmClaudeAccounts({
+    cliPath,
+    model,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    profileDirs: cfg.anthropicProfileDirs,
+  });
+
+  if (asJson) {
+    print(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  if (results.length === 0) {
+    print("No Claude accounts discovered to warm.");
+    return;
+  }
+
+  print(`Warming ${results.length} Claude account(s) with ${model}:`);
+  for (const r of results) {
+    if (r.ok) {
+      const costPart = typeof r.costUsd === "number" ? ` ($${r.costUsd.toFixed(4)})` : "";
+      print(`  ${r.label}: warmed${costPart}`);
+    } else {
+      print(`  ${r.label}: failed (${r.error})`);
+    }
+  }
+}
+
+const WATCH_SLEEP_CHUNK_MS = 30_000;
+
+/** Sleeps up to ms, in chunks, so SIGINT/SIGTERM are noticed promptly rather than after a possibly 76-minute wait. */
+async function sleepInterruptible(ms, isStopped) {
+  let remaining = ms;
+  while (remaining > 0 && !isStopped()) {
+    const chunk = Math.min(WATCH_SLEEP_CHUNK_MS, remaining);
+    await new Promise((resolve) => setTimeout(resolve, chunk));
+    remaining -= chunk;
+  }
+}
+
+// Adaptive, signal-driven alternative to running `warm` on a fixed interval:
+// each account is warmed or skipped per tick based on two signals --
+//   - exhausted: the window is at 0% with a known reset time -> sleep until
+//     just past that reset instead of polling idly in between;
+//   - in-use: the credentials file changed since the last tick (something
+//     real refreshed the token elsewhere) -> skip, nothing to do;
+// otherwise the account is idle and spendable, so it's warmed, and the next
+// check happens after --idle-interval (default 10 min). See
+// lib/warm-schedule.js for the (pure, unit-tested) decision logic.
+async function warmWatchCommand(values) {
+  const cfg = resolveConfig({ projectDir: process.cwd() }).values;
+  const cliPath = findClaudeBinary();
+  if (!cliPath) {
+    fail("claude CLI not found on PATH or ~/.local/bin. Install it first (https://claude.ai/code).");
+  }
+
+  const model = values.model || DEFAULT_WARM_MODEL;
+  const window = windowForProvider(cfg, "anthropic");
+  const idleIntervalMs = values["idle-interval"] !== undefined ? Number(values["idle-interval"]) : DEFAULT_IDLE_INTERVAL_MS;
+  const postResetBufferMs = values["post-reset-buffer"] !== undefined ? Number(values["post-reset-buffer"]) : DEFAULT_POST_RESET_BUFFER_MS;
+
+  let stopped = false;
+  const stop = () => { stopped = true; };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  print(`Watching Claude accounts (window: ${window}, idle interval: ${Math.round(idleIntervalMs / 60000)}min). Ctrl+C to stop.`);
+
+  const state = new Map();
+  while (!stopped) {
+    const { results, nextTickAt } = await tickWarmSchedule({
+      cliPath, model, window, idleIntervalMs, postResetBufferMs,
+      profileDirs: cfg.anthropicProfileDirs, state,
+    });
+
+    const ts = new Date().toLocaleTimeString();
+    if (results.length === 0) {
+      print(`[${ts}] No Claude accounts discovered.`);
+    }
+    for (const r of results) {
+      const nextAt = new Date(r.nextCheckAt).toLocaleTimeString();
+      if (r.action === "warm") {
+        const status = r.warmResult?.ok ? "warmed" : `failed (${r.warmResult?.error ?? "unknown error"})`;
+        print(`[${ts}] ${r.label}: ${status} — next check ~${nextAt}`);
+      } else {
+        print(`[${ts}] ${r.label}: skipped (${r.reason}) — next check ~${nextAt}`);
+      }
+    }
+
+    if (stopped) break;
+    await sleepInterruptible(Math.max(0, nextTickAt - Date.now()), () => stopped);
+  }
+  print("Stopped.");
 }
 
 function postponeCommand(values, positionals) {
@@ -336,6 +548,9 @@ Usage:
   opencode-hard-limit init [--global|--project] [--threshold N] [--install]
   opencode-hard-limit set  --threshold N [--global|--project]
   opencode-hard-limit get
+  opencode-hard-limit accounts [--json]       show quota for every discovered Claude/OpenAI account
+  opencode-hard-limit warm [--model m] [--json]  force a real, minimal call per Claude account to refresh its OAuth token
+  opencode-hard-limit warm --watch               adaptive loop: warm when idle, skip when in-use or exhausted (see below)
   opencode-hard-limit postpone [minutes]      postpone a block for N minutes (default ${DEFAULT_POSTPONE_MINUTES}; requires --allow-postpone)
   opencode-hard-limit postpone --clear        cancel an active postpone early
   opencode-hard-limit install
@@ -353,16 +568,54 @@ Settings (all optional except threshold for 'set'):
   --timeout ms         quota CLI timeout (default ${DEFAULTS.timeoutMs})
   --min-refresh ms     minimum spacing between real quota fetches (default ${DEFAULTS.minRefreshIntervalMs})
   --rate-limit-backoff ms  extra cooldown after a 429/rate-limit (default ${DEFAULTS.rateLimitBackoffMs})
+  --max-rate-limit-backoff ms  cap on a 429's server-sent Retry-After (default ${DEFAULTS.maxRateLimitBackoffMs})
+  --no-baseline-rate-limit-backoff ms  tighter cap used instead when there's no last-known-good reading yet (default ${DEFAULTS.noBaselineRateLimitBackoffMs})
   --stale-margin pct   extra block margin while quota is blind/stale (default ${DEFAULTS.staleBlockMarginPct}; 0 disables)
   --window w           quota window to track: 5h | Weekly (default ${DEFAULTS.window})
   --window-anthropic w quota window for Claude only: 5h | Weekly (default: inherits --window)
   --window-openai w    quota window for OpenAI/Codex only: 5h | Weekly (default: inherits --window)
   --allow-postpone b   enable the "opencode-hard-limit postpone" bypass command: true|false (default ${DEFAULTS.allowPostpone})
 
+Multi-account (optional; auto-detected when present):
+  Claude profiles under ~/.claude-profiles/*/.credentials.json (as set up by
+  @openchamber/opencode-claude's CLAUDE_CONFIG_DIR-per-instance pattern) and
+  a multi-account OpenAI/Codex store such as oc-codex-multi-auth's
+  ~/.opencode/oc-codex-multi-auth-accounts.json are both picked up
+  automatically — no extra setup needed. Override the locations with:
+    --anthropic-profile-dirs, comma-separated (config key: anthropicProfileDirs)
+    --openai-accounts-file (config key: openaiAccountsFile)
+  Run 'opencode-hard-limit accounts' to see what was discovered.
+
+Warm (optional; needs the real \`claude\` CLI on PATH, not just a quota read):
+  Each discovered Claude profile is idle-only as far as quota reads go --
+  reading quota never refreshes an expired OAuth access token, so a profile
+  nothing uses goes "unavailable" until something makes a real call through
+  it. 'warm' makes that real call for you: one minimal, untooled, single-turn
+  prompt per account (default model: ${DEFAULT_WARM_MODEL}, the cheapest), just
+  to let the CLI's own OAuth client refresh the token as a side effect.
+    --model m         model alias/name to warm with (default: ${DEFAULT_WARM_MODEL})
+    --warm-timeout ms per-account spawn timeout (default: 30000)
+
+  'warm --watch' runs that same call on an adaptive, signal-driven schedule
+  instead of once: per account, per tick, it skips rather than warms when
+  either signal says there's no point --
+    - exhausted: window is at 0% with a known reset time -> sleeps until just
+      past that reset (e.g. 75min left on the window -> next check in ~76min)
+      instead of polling idly in between.
+    - in-use: the credentials file changed since the last tick (something
+      real already refreshed the token elsewhere) -> skips, nothing to do.
+  Otherwise the account is idle and spendable, so it warms it, then checks
+  again after --idle-interval. Runs until Ctrl+C.
+    --idle-interval ms     re-check cadence while idle (default: ${DEFAULT_IDLE_INTERVAL_MS})
+    --post-reset-buffer ms extra wait added past a known reset time (default: ${DEFAULT_POST_RESET_BUFFER_MS})
+
 Examples:
   opencode-hard-limit init --global --threshold 30 --install
   opencode-hard-limit set --threshold 30 --global
   opencode-hard-limit get
+  opencode-hard-limit accounts
+  opencode-hard-limit warm
+  opencode-hard-limit warm --watch
   opencode-hard-limit set --allow-postpone true --global
   opencode-hard-limit postpone 60`);
 }
@@ -381,8 +634,18 @@ async function main() {
     return;
   }
 
+  if (cmd === "accounts") {
+    await accountsCommand(values);
+    return;
+  }
+
   if (cmd === "postpone") {
     postponeCommand(values, positionals);
+    return;
+  }
+
+  if (cmd === "warm") {
+    await warmCommand(values);
     return;
   }
 
