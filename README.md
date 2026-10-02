@@ -271,6 +271,31 @@ opencode-hard-limit set --anthropic-profile-dirs "/path/a,/path/b" --global
 opencode-hard-limit set --openai-accounts-file /path/to/accounts.json --global
 ```
 
+### Keeping an idle Claude account's quota readable: `warm`
+
+Quota reads never refresh an expired OAuth access token — `accounts`/the
+sidebar just read `.credentials.json` and call the usage API directly, so a
+Claude profile nothing has used in a while will show up `unavailable` (a 401)
+until *something* makes a real call through it. The real `claude` CLI does
+refresh an expired/near-expiry token on its own, as a side effect of any
+actual invocation — so an account that's never actually used for a model call
+stays unreadable indefinitely.
+
+`warm` forces that real call for you, once per discovered Claude profile: a
+single, minimal, untooled turn (default model: `haiku`, the cheapest in the
+catalog) just to exercise the CLI's own OAuth client. It needs the real
+`claude` CLI on PATH (not just a quota-read dependency):
+
+```sh
+opencode-hard-limit warm          # human-readable
+opencode-hard-limit warm --json   # machine-readable, includes each call's total_cost_usd
+opencode-hard-limit warm --model sonnet --warm-timeout 45000
+```
+
+This is a small but real cost against each account's rate-limit window (not
+free) — run it occasionally (e.g. from a cron job or a shell alias), not on
+every quota poll.
+
 ## Configuration
 
 ### Global vs project

@@ -24,6 +24,8 @@ import {
 
 import { readAccountsWeekly } from "../lib/quota.js";
 
+import { warmClaudeAccounts, findClaudeBinary, DEFAULT_WARM_MODEL } from "../lib/claude-warm.js";
+
 import {
   configDir,
   pluginsDir,
@@ -136,6 +138,8 @@ const SHARED_OPTIONS = {
   "allow-postpone": { type: "string" },
   "anthropic-profile-dirs": { type: "string" },
   "openai-accounts-file": { type: "string" },
+  model: { type: "string" },
+  "warm-timeout": { type: "string" },
   clear: { type: "boolean" },
   install: { type: "boolean" },
   "no-star": { type: "boolean" },
@@ -405,6 +409,56 @@ async function accountsCommand(values) {
   }
 }
 
+// Forces one minimal, real, authenticated `claude` CLI call per discovered
+// Claude profile (default model: Haiku, the cheapest), so each profile's
+// OAuth access token gets refreshed even when nothing in OpenCode is
+// actually using that profile right now. See lib/claude-warm.js for why
+// this is necessary: the quota-read path never refreshes a token itself.
+async function warmCommand(values) {
+  const asJson = Boolean(values.json);
+  const cfg = resolveConfig({ projectDir: process.cwd() }).values;
+  const cliPath = findClaudeBinary();
+
+  if (!cliPath) {
+    const message = "claude CLI not found on PATH or ~/.local/bin. Install it first (https://claude.ai/code).";
+    if (asJson) {
+      print(JSON.stringify({ ok: false, error: message }));
+      return;
+    }
+    fail(message);
+  }
+
+  const model = values.model || DEFAULT_WARM_MODEL;
+  const timeoutMs = values["warm-timeout"] !== undefined ? Number(values["warm-timeout"]) : undefined;
+
+  const results = await warmClaudeAccounts({
+    cliPath,
+    model,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    profileDirs: cfg.anthropicProfileDirs,
+  });
+
+  if (asJson) {
+    print(JSON.stringify(results, null, 2));
+    return;
+  }
+
+  if (results.length === 0) {
+    print("No Claude accounts discovered to warm.");
+    return;
+  }
+
+  print(`Warming ${results.length} Claude account(s) with ${model}:`);
+  for (const r of results) {
+    if (r.ok) {
+      const costPart = typeof r.costUsd === "number" ? ` ($${r.costUsd.toFixed(4)})` : "";
+      print(`  ${r.label}: warmed${costPart}`);
+    } else {
+      print(`  ${r.label}: failed (${r.error})`);
+    }
+  }
+}
+
 function postponeCommand(values, positionals) {
   const cfg = resolveConfig({ projectDir: process.cwd() }).values;
   if (!cfg.allowPostpone) {
@@ -441,6 +495,7 @@ Usage:
   opencode-hard-limit set  --threshold N [--global|--project]
   opencode-hard-limit get
   opencode-hard-limit accounts [--json]       show quota for every discovered Claude/OpenAI account
+  opencode-hard-limit warm [--model m] [--json]  force a real, minimal call per Claude account to refresh its OAuth token
   opencode-hard-limit postpone [minutes]      postpone a block for N minutes (default ${DEFAULT_POSTPONE_MINUTES}; requires --allow-postpone)
   opencode-hard-limit postpone --clear        cancel an active postpone early
   opencode-hard-limit install
@@ -480,11 +535,22 @@ Multi-account (optional; auto-detected when present):
     --openai-accounts-file (config key: openaiAccountsFile)
   Run 'opencode-hard-limit accounts' to see what was discovered.
 
+Warm (optional; needs the real \`claude\` CLI on PATH, not just a quota read):
+  Each discovered Claude profile is idle-only as far as quota reads go --
+  reading quota never refreshes an expired OAuth access token, so a profile
+  nothing uses goes "unavailable" until something makes a real call through
+  it. 'warm' makes that real call for you: one minimal, untooled, single-turn
+  prompt per account (default model: ${DEFAULT_WARM_MODEL}, the cheapest), just
+  to let the CLI's own OAuth client refresh the token as a side effect.
+    --model m         model alias/name to warm with (default: ${DEFAULT_WARM_MODEL})
+    --warm-timeout ms per-account spawn timeout (default: 30000)
+
 Examples:
   opencode-hard-limit init --global --threshold 30 --install
   opencode-hard-limit set --threshold 30 --global
   opencode-hard-limit get
   opencode-hard-limit accounts
+  opencode-hard-limit warm
   opencode-hard-limit set --allow-postpone true --global
   opencode-hard-limit postpone 60`);
 }
@@ -510,6 +576,11 @@ async function main() {
 
   if (cmd === "postpone") {
     postponeCommand(values, positionals);
+    return;
+  }
+
+  if (cmd === "warm") {
+    await warmCommand(values);
     return;
   }
 

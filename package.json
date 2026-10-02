@@ -22,6 +22,7 @@
     "lib/quota.js",
     "lib/evaluate.js",
     "lib/accounts.js",
+    "lib/claude-warm.js",
     "lib/postpone.js",
     "lib/reset.js",
     "lib/star.js",
