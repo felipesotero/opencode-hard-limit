@@ -5,14 +5,14 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { discoverAnthropicAccounts, discoverOpenAIAccounts } from "../lib/accounts.js";
+import { discoverAnthropicProfiles, discoverOpenAIAccounts } from "../lib/accounts.js";
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "qhl-accounts-"));
   return root;
 }
 
-function withEnv(env, fn) {
+async function withEnv(env, fn) {
   const saved = {};
   for (const k of Object.keys(env)) {
     saved[k] = process.env[k];
@@ -20,7 +20,7 @@ function withEnv(env, fn) {
     else process.env[k] = env[k];
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     for (const k of Object.keys(env)) {
       if (saved[k] === undefined) delete process.env[k];
@@ -45,17 +45,17 @@ function writeCredentialsWithRefresh(dir, refreshToken) {
 }
 
 // ---------------------------------------------------------------------------
-// discoverAnthropicAccounts
+// discoverAnthropicProfiles
 // ---------------------------------------------------------------------------
 
-test("discoverAnthropicAccounts: explicit profileDirs -> one account per dir with a .credentials.json", () => {
+test("discoverAnthropicProfiles: explicit profileDirs -> one account per dir with a .credentials.json", async () => {
   const root = sandbox();
   const pro = join(root, "profiles", "pro");
   const max = join(root, "profiles", "max");
   writeCredentials(pro);
   writeCredentials(max);
 
-  const accounts = discoverAnthropicAccounts({ profileDirs: [pro, max] });
+  const accounts = await discoverAnthropicProfiles({ profileDirs: [pro, max] });
   assert.equal(accounts.length, 2);
   assert.deepEqual(accounts.map((a) => a.id), ["pro", "max"]);
   assert.deepEqual(accounts.map((a) => a.label), ["Claude Pro", "Claude Max"]);
@@ -63,34 +63,34 @@ test("discoverAnthropicAccounts: explicit profileDirs -> one account per dir wit
   assert.equal(accounts[0].configDir, pro);
 });
 
-test("discoverAnthropicAccounts: skips directories without a .credentials.json", () => {
+test("discoverAnthropicProfiles: skips directories without a .credentials.json", async () => {
   const root = sandbox();
   const pro = join(root, "profiles", "pro");
   const empty = join(root, "profiles", "empty");
   writeCredentials(pro);
   mkdirSync(empty, { recursive: true });
 
-  const accounts = discoverAnthropicAccounts({ profileDirs: [pro, empty] });
+  const accounts = await discoverAnthropicProfiles({ profileDirs: [pro, empty] });
   assert.equal(accounts.length, 1);
   assert.equal(accounts[0].id, "pro");
 });
 
-test("discoverAnthropicAccounts: dedupes an explicitly repeated directory", () => {
+test("discoverAnthropicProfiles: dedupes an explicitly repeated directory", async () => {
   const root = sandbox();
   const pro = join(root, "profiles", "pro");
   writeCredentials(pro);
 
-  const accounts = discoverAnthropicAccounts({ profileDirs: [pro, pro] });
+  const accounts = await discoverAnthropicProfiles({ profileDirs: [pro, pro] });
   assert.equal(accounts.length, 1);
 });
 
-test("discoverAnthropicAccounts: nonexistent profileDirs entries are ignored, never throw", () => {
+test("discoverAnthropicProfiles: nonexistent profileDirs entries are ignored, never throw", async () => {
   const root = sandbox();
-  const accounts = discoverAnthropicAccounts({ profileDirs: [join(root, "does-not-exist")] });
+  const accounts = await discoverAnthropicProfiles({ profileDirs: [join(root, "does-not-exist")] });
   assert.deepEqual(accounts, []);
 });
 
-test("discoverAnthropicAccounts: default convention scans ~/.claude-profiles/*, ignoring ~/.claude", () => {
+test("discoverAnthropicProfiles: default convention scans ~/.claude-profiles/*, ignoring ~/.claude", async () => {
   const home = sandbox();
   writeCredentials(join(home, ".claude-profiles", "max"));
   writeCredentials(join(home, ".claude-profiles", "pro"));
@@ -99,55 +99,54 @@ test("discoverAnthropicAccounts: default convention scans ~/.claude-profiles/*, 
   // rate limit.
   writeCredentialsWithRefresh(join(home, ".claude"), "refresh-leftover");
 
-  withEnv({ HOME: home }, () => {
-    const accounts = discoverAnthropicAccounts();
+  await withEnv({ HOME: home }, async () => {
+    const accounts = await discoverAnthropicProfiles();
     // Profiles are read in directory-name sort order (max, pro).
     assert.deepEqual(accounts.map((a) => a.id), ["max", "pro"]);
     assert.deepEqual(accounts.map((a) => a.label), ["Claude Max", "Claude Pro"]);
   });
 });
 
-test("discoverAnthropicAccounts: a profiles dir holding no credentials still falls back to ~/.claude", () => {
+test("discoverAnthropicProfiles: profiles dir without credentials does not discover ~/.claude", async () => {
   const home = sandbox();
-  // Mirrors a real setup where ~/.claude-profiles has stray entries (e.g. a
-  // `pro.lock` dir) but no actual profile: the fallback must key off accounts
-  // found, not dirs scanned.
+  // A stray directory is not a profile, and the default ~/.claude login is
+  // handled by the legacy credential chain, not profile discovery.
   mkdirSync(join(home, ".claude-profiles", "pro.lock"), { recursive: true });
   writeCredentials(join(home, ".claude"));
 
-  withEnv({ HOME: home }, () => {
-    assert.deepEqual(discoverAnthropicAccounts().map((a) => a.id), ["default"]);
+  await withEnv({ HOME: home }, async () => {
+    assert.deepEqual(await discoverAnthropicProfiles(), []);
   });
 });
 
-test("discoverAnthropicAccounts: default convention with only ~/.claude (no profiles dir) -> one account", () => {
+test("discoverAnthropicProfiles: default convention ignores ~/.claude when no named profiles exist", async () => {
   const home = sandbox();
   writeCredentials(join(home, ".claude"));
 
-  withEnv({ HOME: home }, () => {
-    const accounts = discoverAnthropicAccounts();
-    assert.deepEqual(accounts.map((a) => a.id), ["default"]);
+  await withEnv({ HOME: home }, async () => {
+    const accounts = await discoverAnthropicProfiles();
+    assert.deepEqual(accounts, []);
   });
 });
 
-test("discoverAnthropicAccounts: no profiles dir and no default credentials -> []", () => {
+test("discoverAnthropicProfiles: no profiles dir and no default credentials -> []", async () => {
   const home = sandbox();
-  withEnv({ HOME: home }, () => {
-    assert.deepEqual(discoverAnthropicAccounts(), []);
+  await withEnv({ HOME: home }, async () => {
+    assert.deepEqual(await discoverAnthropicProfiles(), []);
   });
 });
 
-test("discoverAnthropicAccounts: two named profiles sharing one login collapse to the first", () => {
+test("discoverAnthropicProfiles: two named profiles sharing one login collapse to the first", async () => {
   const home = sandbox();
   writeCredentialsWithRefresh(join(home, ".claude-profiles", "max"), "refresh-same");
   writeCredentialsWithRefresh(join(home, ".claude-profiles", "pro"), "refresh-same");
 
-  withEnv({ HOME: home }, () => {
-    assert.deepEqual(discoverAnthropicAccounts().map((a) => a.id), ["max"]);
+  await withEnv({ HOME: home }, async () => {
+    assert.deepEqual((await discoverAnthropicProfiles()).map((a) => a.id), ["max"]);
   });
 });
 
-test("discoverAnthropicAccounts: credentials without a readable refresh token are never deduped", () => {
+test("discoverAnthropicProfiles: credentials without a readable refresh token are never deduped", async () => {
   const home = sandbox();
   // Refresh-less or unparseable credentials must stay distinct accounts rather
   // than collapsing into one on a shared null identity.
@@ -156,8 +155,8 @@ test("discoverAnthropicAccounts: credentials without a readable refresh token ar
   mkdirSync(join(home, ".claude-profiles", "work"), { recursive: true });
   writeFileSync(join(home, ".claude-profiles", "work", ".credentials.json"), "{ not json", "utf8");
 
-  withEnv({ HOME: home }, () => {
-    assert.deepEqual(discoverAnthropicAccounts().map((a) => a.id), ["max", "pro", "work"]);
+  await withEnv({ HOME: home }, async () => {
+    assert.deepEqual((await discoverAnthropicProfiles()).map((a) => a.id), ["max", "pro", "work"]);
   });
 });
 
@@ -169,7 +168,7 @@ function writeAccountsFile(path, data) {
   writeFileSync(path, JSON.stringify(data), "utf8");
 }
 
-test("discoverOpenAIAccounts: parses accounts, marks the activeIndex entry, builds email+planType labels", () => {
+test("discoverOpenAIAccounts: parses accounts, marks the activeIndex entry, builds email+planType labels", async () => {
   const root = sandbox();
   const path = join(root, "accounts.json");
   writeAccountsFile(path, {
@@ -181,7 +180,7 @@ test("discoverOpenAIAccounts: parses accounts, marks the activeIndex entry, buil
     ],
   });
 
-  const accounts = discoverOpenAIAccounts({ accountsFile: path });
+  const accounts = await discoverOpenAIAccounts({ accountsFile: path });
   assert.equal(accounts.length, 2);
   assert.equal(accounts[0].id, "acc-1");
   assert.equal(accounts[0].label, "a@example.com (team)");
@@ -192,7 +191,7 @@ test("discoverOpenAIAccounts: parses accounts, marks the activeIndex entry, buil
   assert.equal(accounts[1].isActive, true);
 });
 
-test("discoverOpenAIAccounts: entries without an accessToken are filtered out", () => {
+test("discoverOpenAIAccounts: entries without an accessToken are filtered out", async () => {
   const root = sandbox();
   const path = join(root, "accounts.json");
   writeAccountsFile(path, {
@@ -200,45 +199,45 @@ test("discoverOpenAIAccounts: entries without an accessToken are filtered out", 
     accounts: [{ accountId: "acc-1", email: "a@example.com" }, { accountId: "acc-2", accessToken: "t2" }],
   });
 
-  const accounts = discoverOpenAIAccounts({ accountsFile: path });
+  const accounts = await discoverOpenAIAccounts({ accountsFile: path });
   assert.equal(accounts.length, 1);
   assert.equal(accounts[0].id, "acc-2");
 });
 
-test("discoverOpenAIAccounts: missing accountId falls back to a positional id and #n label", () => {
+test("discoverOpenAIAccounts: missing accountId falls back to a positional id and #n label", async () => {
   const root = sandbox();
   const path = join(root, "accounts.json");
   writeAccountsFile(path, { activeIndex: 0, accounts: [{ accessToken: "t1" }] });
 
-  const accounts = discoverOpenAIAccounts({ accountsFile: path });
+  const accounts = await discoverOpenAIAccounts({ accountsFile: path });
   assert.equal(accounts[0].id, "openai-0");
   assert.equal(accounts[0].label, "OpenAI #1");
   assert.equal(accounts[0].accountId, null);
 });
 
-test("discoverOpenAIAccounts: missing file -> null", () => {
+test("discoverOpenAIAccounts: missing file -> null", async () => {
   const root = sandbox();
-  assert.equal(discoverOpenAIAccounts({ accountsFile: join(root, "nope.json") }), null);
+  assert.equal(await discoverOpenAIAccounts({ accountsFile: join(root, "nope.json") }), null);
 });
 
-test("discoverOpenAIAccounts: invalid JSON -> null", () => {
+test("discoverOpenAIAccounts: invalid JSON -> null", async () => {
   const root = sandbox();
   const path = join(root, "accounts.json");
   mkdirSync(root, { recursive: true });
   writeFileSync(path, "{ not json", "utf8");
-  assert.equal(discoverOpenAIAccounts({ accountsFile: path }), null);
+  assert.equal(await discoverOpenAIAccounts({ accountsFile: path }), null);
 });
 
-test("discoverOpenAIAccounts: empty accounts array -> null", () => {
+test("discoverOpenAIAccounts: empty accounts array -> null", async () => {
   const root = sandbox();
   const path = join(root, "accounts.json");
   writeAccountsFile(path, { activeIndex: 0, accounts: [] });
-  assert.equal(discoverOpenAIAccounts({ accountsFile: path }), null);
+  assert.equal(await discoverOpenAIAccounts({ accountsFile: path }), null);
 });
 
-test("discoverOpenAIAccounts: accounts array present but all entries lack a usable token -> null", () => {
+test("discoverOpenAIAccounts: accounts array present but all entries lack a usable token -> null", async () => {
   const root = sandbox();
   const path = join(root, "accounts.json");
   writeAccountsFile(path, { activeIndex: 0, accounts: [{ accountId: "acc-1" }] });
-  assert.equal(discoverOpenAIAccounts({ accountsFile: path }), null);
+  assert.equal(await discoverOpenAIAccounts({ accountsFile: path }), null);
 });

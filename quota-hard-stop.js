@@ -17,71 +17,69 @@
 //   env var > project file > global file > built-in default.
 // See README.md and `opencode-hard-limit --help` for details.
 
-import { readWeekly, MONITORED_PROVIDERS, quotaCachePath, readAnthropicAccountKey } from "./lib/quota.js";
+import { readWeekly, quotaCachePath, resolveQuotaAccount } from "./lib/quota.js";
 import { resolveConfig, windowForProvider } from "./lib/config.js";
-import { resolveQuotaProvider, resolveAnthropicProfileSlug, evaluate } from "./lib/evaluate.js";
-import { discoverAnthropicAccounts } from "./lib/accounts.js";
+import { resolveQuotaProvider, evaluate } from "./lib/evaluate.js";
 import { ensureCliInstalled, ensureTuiDeployed, cleanupLegacyCopies } from "./lib/deploy.js";
 import { isPostponeActive } from "./lib/postpone.js";
 
-const cache = new Map(); // "quotaProvider[:accountId]:window" -> { at, result, ttl }
-const inflight = new Map(); // "quotaProvider[:accountId]:window" -> Promise (dedupe concurrent checks)
-const seenKeys = new Set(); // tracked provider[:accountId]:window combos seen in chat.params
+const cache = new Map(); // "provider:accountKey:window" -> { at, result, ttl }
+const inflight = new Map(); // cache key -> Promise (dedupe concurrent checks)
+const seenKeys = new Map(); // cache key -> { provider, providerId, window }
 const ERROR_TTL_CAP_MS = 10000; // cap transient failures; stale entries can be background-refreshed
 let quotaReader = readWeekly;
 let cliInstaller = ensureCliInstalled;
 
-function cacheKey(provider, window, accountId) {
-  return accountId ? `${provider}:${accountId}:${window}` : `${provider}:${window}`;
+function cacheKey(provider, accountKey, window) {
+  return `${provider}:${accountKey}:${window}`;
 }
 
-function getCached(provider, window, accountId) {
-  return cache.get(cacheKey(provider, window, accountId))?.result ?? null;
+function getCached(provider, accountKey, window) {
+  return cache.get(cacheKey(provider, accountKey, window))?.result ?? null;
 }
 
-function getCacheEntry(provider, window, accountId) {
-  return cache.get(cacheKey(provider, window, accountId)) ?? null;
+function getCacheEntry(provider, accountKey, window) {
+  return cache.get(cacheKey(provider, accountKey, window)) ?? null;
 }
 
 function isCacheFresh(entry) {
   return Boolean(entry && Date.now() - entry.at < entry.ttl);
 }
 
-// Resolve which specific Claude account/profile a call to `providerId`
-// targets, when multiple isolated Claude Code logins are registered as
-// separate provider instances (see @openchamber/opencode-claude's
-// CLAUDE_CONFIG_DIR-per-instance pattern, e.g. "claude-pro" / "claude-max").
-// Returns undefined when there's no such match — callers then fall back to
-// the single default-login behavior, unchanged from before multi-account
-// support existed. Never throws (fs access inside discoverAnthropicAccounts
-// is already best-effort).
-function resolveAnthropicAccountId(providerId, quotaProvider, cfg) {
-  if (quotaProvider !== "anthropic") return undefined;
-  const slug = resolveAnthropicProfileSlug(providerId);
-  if (!slug) return undefined;
-  const accounts = discoverAnthropicAccounts({ profileDirs: cfg.anthropicProfileDirs });
-  return accounts.some((a) => a.id === slug) ? slug : undefined;
-}
-
-// A key holds either 2 parts ("provider:window") or 3 ("provider:accountId:window").
-function parseSeenKey(key) {
-  const parts = key.split(":");
-  if (parts.length >= 3) {
-    return [parts[0], parts[parts.length - 1] || "Weekly", parts[1]];
-  }
-  const i = key.indexOf(":");
-  return i < 0 ? [key, "Weekly", undefined] : [key.slice(0, i), key.slice(i + 1) || "Weekly", undefined];
-}
-
 async function refreshQuota(
   provider,
   cfg,
-  { window = windowForProvider(cfg, provider), force = false, accountId = undefined } = {},
+  { window = windowForProvider(cfg, provider), force = false, account = undefined, providerId = provider } = {},
 ) {
   const quotaWindow = window || "Weekly";
-  const key = cacheKey(provider, quotaWindow, accountId);
-  const cached = cache.get(key);
+  const resolvedAccount = account ?? await resolveQuotaAccount({
+    provider,
+    providerId,
+    accountsFile: cfg.anthropicAccountsFile,
+    credentialSource: cfg.anthropicCredentialSource,
+    anthropicProfileDirs: cfg.anthropicProfileDirs,
+    openaiAccountsFile: cfg.openaiAccountsFile,
+  });
+  const key = cacheKey(provider, resolvedAccount.accountKey, quotaWindow);
+  if (resolvedAccount.error) {
+    return quotaReader({
+      provider,
+      providerId,
+      window: quotaWindow,
+      account: resolvedAccount,
+      timeoutMs: cfg.timeoutMs,
+      cacheTtlMs: cfg.cacheTtlMs,
+      rateLimitBackoffMs: cfg.rateLimitBackoffMs,
+      minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+      accountsFile: cfg.anthropicAccountsFile,
+      credentialSource: cfg.anthropicCredentialSource,
+      cacheFile: quotaCachePath(),
+      anthropicProfileDirs: cfg.anthropicProfileDirs,
+      openaiAccountsFile: cfg.openaiAccountsFile,
+    });
+  }
 
+  const cached = cache.get(key);
   if (!force && cached && Date.now() - cached.at < cached.ttl) return cached.result;
 
   const pending = inflight.get(key);
@@ -89,8 +87,9 @@ async function refreshQuota(
 
   const pendingFetch = quotaReader({
     provider,
+    providerId,
     window: quotaWindow,
-    accountId,
+    account: resolvedAccount,
     timeoutMs: cfg.timeoutMs,
     cacheTtlMs: cfg.cacheTtlMs,
     rateLimitBackoffMs: cfg.rateLimitBackoffMs,
@@ -105,13 +104,8 @@ async function refreshQuota(
       const finishedAt = Date.now();
       const at = typeof result?.receivedAt === "number" ? result.receivedAt : finishedAt;
       const ttl = result.ok ? cfg.cacheTtlMs : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
-
-      cache.set(key, { at, result, ttl, accountKey: result?.accountKey ?? null });
-
+      cache.set(key, { at, result, ttl });
       return result;
-    })
-    .catch((err) => {
-      throw err;
     })
     .finally(() => {
       inflight.delete(key);
@@ -128,49 +122,45 @@ function humanReason(reason, fallback) {
 }
 
 export const QuotaHardStopPlugin = async ({ directory } = {}) => {
-  // Self-heal: ensure deployed sidebar and globally callable CLI match the installed npm version.
-  // ensureTuiDeployed never throws — outer try/catch is not needed.
   ensureTuiDeployed();
   cliInstaller();
-  // Defer cleanupLegacyCopies to avoid racing opencode's plugins-dir autoloader.
   setTimeout(() => { try { cleanupLegacyCopies(); } catch {} }, 30_000).unref?.();
 
   return {
     "chat.params": async (input) => {
       const cfg = resolveConfig({ projectDir: directory }).values;
-
       const providerId =
         input?.provider?.info?.id ??
         input?.model?.providerID ??
         input?.model?.provider;
-
       const quotaProvider = resolveQuotaProvider(providerId);
-      if (!quotaProvider) return; // provider not monitored -> allow
+      if (!quotaProvider) return;
 
       const quotaWindow = windowForProvider(cfg, quotaProvider);
-      // When this call targets a specific Claude profile (e.g. provider id
-      // "claude-pro" / "claude-max" from @openchamber/opencode-claude's
-      // one-instance-per-account pattern), check THAT account's quota
-      // instead of always falling back to the single default login shared
-      // by every Anthropic provider id.
-      const accountId = resolveAnthropicAccountId(providerId, quotaProvider, cfg);
+      const account = await resolveQuotaAccount({
+        provider: quotaProvider,
+        providerId,
+        accountsFile: cfg.anthropicAccountsFile,
+        credentialSource: cfg.anthropicCredentialSource,
+        anthropicProfileDirs: cfg.anthropicProfileDirs,
+        openaiAccountsFile: cfg.openaiAccountsFile,
+      });
+      const key = cacheKey(quotaProvider, account.accountKey, quotaWindow);
+      seenKeys.set(key, { provider: quotaProvider, providerId, window: quotaWindow });
 
-      const key = cacheKey(quotaProvider, quotaWindow, accountId);
-      seenKeys.add(key);
-
-      const cachedEntry = getCacheEntry(quotaProvider, quotaWindow, accountId);
+      const cachedEntry = getCacheEntry(quotaProvider, account.accountKey, quotaWindow);
       let res;
-      const accountChanged = cachedEntry && quotaProvider === "anthropic" &&
-        (cachedEntry.accountKey ?? null) !== await readAnthropicAccountKey({
-          accountsFile: cfg.anthropicAccountsFile,
-          credentialSource: cfg.anthropicCredentialSource,
+      if (!cachedEntry || account.error) {
+        res = await refreshQuota(quotaProvider, cfg, {
+          window: quotaWindow,
+          force: true,
+          account,
+          providerId,
         });
-      if (!cachedEntry || accountChanged) {
-        res = await refreshQuota(quotaProvider, cfg, { window: quotaWindow, force: true, accountId });
       } else {
         res = cachedEntry.result;
         if (!isCacheFresh(cachedEntry)) {
-          refreshQuota(quotaProvider, cfg, { window: quotaWindow, accountId }).catch(() => {});
+          refreshQuota(quotaProvider, cfg, { window: quotaWindow, account, providerId }).catch(() => {});
         }
       }
       let { block, reason } = evaluate(quotaProvider, res, cfg);
@@ -218,32 +208,40 @@ export const QuotaHardStopPlugin = async ({ directory } = {}) => {
             ` There is no override configured for this. Wait for quota to refresh, or raise the ` +
             `threshold: opencode-hard-limit set --threshold <value> --global.`;
         }
-        const quotaProviderLabel = accountId ? `${quotaProvider}:${accountId}` : quotaProvider;
+        const defaultAccount = account.accountKey === "cli" || account.accountKey === "oc:default";
+        const quotaProviderLabel = defaultAccount
+          ? quotaProvider
+          : `${quotaProvider}:${account.accountKey} (${account.label})`;
         throw new Error(`[quota-hard-stop] Blocked ${providerId} (${quotaProviderLabel}): ${blockMsg}`);
       }
-      // Otherwise allow silently — no toast/sound; the sidebar widget is the
-      // only surface for quota state (including unreadable/fallback cases).
     },
     event: async ({ event }) => {
       try {
         if (!event || typeof event !== "object") return;
-
         const isIdle =
           event.type === "session.idle" ||
           (event.type === "session.status" && event.properties?.status?.type === "idle");
         if (!isIdle || seenKeys.size === 0) return;
 
         const cfg = resolveConfig({ projectDir: directory }).values;
-        const refreshes = [];
-
-        for (const key of seenKeys) {
-          const [provider, window, accountId] = parseSeenKey(key);
-          refreshes.push(refreshQuota(provider, cfg, { window, accountId }));
+        const refreshes = new Map();
+        for (const { provider, providerId, window } of seenKeys.values()) {
+          const account = await resolveQuotaAccount({
+            provider,
+            providerId,
+            accountsFile: cfg.anthropicAccountsFile,
+            credentialSource: cfg.anthropicCredentialSource,
+            anthropicProfileDirs: cfg.anthropicProfileDirs,
+            openaiAccountsFile: cfg.openaiAccountsFile,
+          });
+          const key = cacheKey(provider, account.accountKey, window);
+          if (!refreshes.has(key)) {
+            refreshes.set(key, refreshQuota(provider, cfg, { window, account, providerId }));
+          }
         }
-
-        await Promise.allSettled(refreshes);
+        await Promise.allSettled(refreshes.values());
       } catch {
-        // event hook must never interfere with the agent lifecycle
+        // Event hooks must not interfere with the agent lifecycle.
       }
     },
   };

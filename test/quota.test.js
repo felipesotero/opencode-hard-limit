@@ -48,31 +48,6 @@ function writeOpenAIAuth(xdg) {
   );
 }
 
-// Writes a fake `claude` CLI stub that returns DIFFERENT windows depending on
-// the CLAUDE_CONFIG_DIR it was invoked with (mapConfigDirToWindows keys are
-// absolute config-dir paths). Used to prove the account-scoped fetch path
-// actually pins CLAUDE_CONFIG_DIR per account instead of sharing one login —
-// the exact bug multi-account support fixes (see quota-hard-stop.js).
-function writeConfigAwareClaudeStub(file, mapConfigDirToWindows) {
-  writeFileSync(
-    file,
-    `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args.includes("--version")) { console.log("claude 1.0.0"); process.exit(0); }
-if (args[0] === "auth" && args[1] === "status") {
-  const map = ${JSON.stringify(mapConfigDirToWindows)};
-  const dir = process.env.CLAUDE_CONFIG_DIR || "";
-  const windows = map[dir] || {};
-  console.log(JSON.stringify({ authenticated: true, ...windows }));
-  process.exit(0);
-}
-process.exit(1);
-`,
-    "utf8",
-  );
-  chmodSync(file, 0o755);
-}
-
 // Writes a fake `claude` CLI stub exposing only the windows present in `windows`
 // (a subset of { five_hour, seven_day }), so fetchAnthropic's CLI path can be
 // exercised for the single-window-account fallback case.
@@ -455,8 +430,8 @@ test("readWeekly: fallback persisted under REQUESTED cache key with effective re
       const result = await readWeekly({ provider: "openai", window: "5h", cacheFile, timeoutMs: 1000 });
       assert.equal(result.windowFallback, true);
 
-      const stored = JSON.parse(readFileSync(cacheFile, "utf8"))["openai:5h"];
-      assert.ok(stored, "expected the fallback result stored under the REQUESTED key openai:5h");
+      const stored = JSON.parse(readFileSync(cacheFile, "utf8"))["openai:oc:default:5h"];
+      assert.ok(stored, "expected the fallback result stored under the REQUESTED key openai:oc:default:5h");
       assert.equal(stored.result.window, "Weekly");
       assert.equal(stored.result.requestedWindow, "5h");
       assert.equal(stored.result.windowFallback, true);
@@ -471,12 +446,12 @@ test("readWeekly: a pre-seeded mislabeled ok-entry is overwritten by the next su
   writeOpenAIAuth(xdg);
 
   // Seed the REAL poisoned shape: an old positional-picker result mislabeled
-  // as "5h" when it was actually 7d/Weekly data, cached under "openai:5h".
+  // as "5h" when it was actually 7d/Weekly data, cached under "openai:oc:default:5h".
   writeFileSync(
     cacheFile,
     JSON.stringify(
       {
-        "openai:5h": {
+        "openai:oc:default:5h": {
           at: 1000,
           nextAllowedAt: 0,
           result: { ok: true, status: "ok", remaining: 50, resetAt: null, unlimited: false, window: "5h" },
@@ -512,7 +487,7 @@ test("readWeekly: a pre-seeded mislabeled ok-entry is overwritten by the next su
       assert.equal(result.window, "Weekly");
       assert.equal(result.remaining, 92);
 
-      const stored = JSON.parse(readFileSync(cacheFile, "utf8"))["openai:5h"];
+      const stored = JSON.parse(readFileSync(cacheFile, "utf8"))["openai:oc:default:5h"];
       assert.equal(stored.result.window, "Weekly"); // poisoned "5h" label corrected
       assert.equal(stored.result.remaining, 92);
     });
@@ -683,7 +658,7 @@ test("claude-cli credential source bypasses multi-account tiers", async () => {
       const result = await readWeekly({ provider: "anthropic", accountsFile, credentialSource: "claude-cli", cacheFile: null, timeoutMs: 1000 });
       assert.equal(result.ok, true);
       assert.equal(result.remaining, 75);
-      assert.equal(result.accountKey, null);
+      assert.equal(result.accountKey, "cli");
     });
   } finally {
     __internals.__resetMultiAccountSticky();
@@ -823,64 +798,101 @@ test("managed account rejects a 401 without invoking the legacy CLI", async () =
 // readAccountsWeekly (multi-account)
 // -----------------------------------------------------------------------
 
-test("readAccountsWeekly: anthropic — each discovered profile is read with ITS OWN CLAUDE_CONFIG_DIR (regression for the pro/max credential-bleed bug)", async () => {
-  const { root, bin } = sandbox();
+test("readAccountsWeekly: anthropic profiles send their own Authorization token", async () => {
+  const { root, home, xdg } = sandbox();
   const proDir = join(root, "profiles", "pro");
   const maxDir = join(root, "profiles", "max");
+  const xdgConfig = join(root, "xdg-config");
+  const accountsFile = join(root, "anthropic-accounts.json");
   mkdirSync(proDir, { recursive: true });
   mkdirSync(maxDir, { recursive: true });
-  writeFileSync(join(proDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "irrelevant" } }), "utf8");
-  writeFileSync(join(maxDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "irrelevant" } }), "utf8");
-  writeConfigAwareClaudeStub(bin, {
-    [proDir]: { five_hour: { used_percentage: 80 } }, // 20% left
-    [maxDir]: { five_hour: { used_percentage: 10 } }, // 90% left
-  });
-
-  await withEnv({ OPENCODE_QUOTA_CLAUDE_BIN: bin }, async () => {
-    const results = await readAccountsWeekly({
-      provider: "anthropic",
-      window: "5h",
-      cacheFile: null,
-      timeoutMs: 1000,
-      anthropicProfileDirs: [proDir, maxDir],
-    });
-    assert.equal(results.length, 2);
-    const pro = results.find((r) => r.accountId === "pro");
-    const max = results.find((r) => r.accountId === "max");
-    assert.equal(pro.remaining, 20);
-    assert.equal(pro.accountLabel, "Claude Pro");
-    assert.equal(max.remaining, 90);
-    assert.equal(max.accountLabel, "Claude Max");
-  });
-});
-
-test("readAccountsWeekly: anthropic — no discoverable profiles falls back to a single 'default' entry", async () => {
-  const { root, home, xdg, bin } = sandbox();
-  writeClaudeStubWith(bin, {});
-  writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok" } }), "utf8");
+  writeFileSync(join(proDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok-pro" } }), "utf8");
+  writeFileSync(join(maxDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok-max" } }), "utf8");
   const savedFetch = global.fetch;
-  global.fetch = async () => ({
-    ok: true,
-    status: 200,
-    headers: { get: () => null },
-    text: async () => JSON.stringify({ five_hour: { utilization: 25 } }),
-  });
+  const authorizations = [];
+  global.fetch = async (_url, options) => {
+    const authorization = options.headers.Authorization;
+    authorizations.push(authorization);
+    const utilization = authorization === "Bearer tok-pro" ? 80 : 10;
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ five_hour: { utilization } }),
+    };
+  };
+  __internals.__resetMultiAccountSticky();
   try {
-    await withEnv({ HOME: home, XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin }, async () => {
+    await withEnv({
+      HOME: home,
+      XDG_CONFIG_HOME: xdgConfig,
+      XDG_DATA_HOME: xdg,
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: accountsFile,
+    }, async () => {
       const results = await readAccountsWeekly({
         provider: "anthropic",
         window: "5h",
         cacheFile: null,
         timeoutMs: 1000,
-        anthropicProfileDirs: [join(root, "no-such-profile")],
+        anthropicProfileDirs: [proDir, maxDir],
       });
-      assert.equal(results.length, 1);
-      assert.equal(results[0].accountId, "default");
-      assert.equal(results[0].accountLabel, "Claude");
-      assert.equal(results[0].isActive, true);
+      assert.equal(results.length, 2);
+      const pro = results.find((result) => result.accountKey === "cp:pro");
+      const max = results.find((result) => result.accountKey === "cp:max");
+      assert.equal(pro.remaining, 20);
+      assert.equal(pro.accountLabel, "Claude Pro");
+      assert.equal(max.remaining, 90);
+      assert.equal(max.accountLabel, "Claude Max");
+      assert.deepEqual(authorizations, ["Bearer tok-pro", "Bearer tok-max"]);
     });
   } finally {
     global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
+  }
+});
+
+test("readAccountsWeekly: anthropic without named profiles returns the legacy CLI account", async () => {
+  const { root, home, xdg, bin } = sandbox();
+  const xdgConfig = join(root, "xdg-config");
+  const accountsFile = join(root, "anthropic-accounts.json");
+  writeClaudeStubWith(bin, {});
+  writeFileSync(join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok-default" } }), "utf8");
+  const savedFetch = global.fetch;
+  const authorizations = [];
+  global.fetch = async (_url, options) => {
+    authorizations.push(options.headers.Authorization);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ five_hour: { utilization: 25 } }),
+    };
+  };
+  __internals.__resetMultiAccountSticky();
+  try {
+    await withEnv({
+      HOME: home,
+      XDG_CONFIG_HOME: xdgConfig,
+      XDG_DATA_HOME: xdg,
+      OPENCODE_QUOTA_CLAUDE_BIN: bin,
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: accountsFile,
+    }, async () => {
+      const results = await readAccountsWeekly({
+        provider: "anthropic",
+        window: "5h",
+        cacheFile: null,
+        timeoutMs: 1000,
+      });
+      assert.equal(results.length, 1);
+      assert.equal(results[0].accountKey, "cli");
+      assert.equal(results[0].accountLabel, "Claude");
+      assert.equal(results[0].isActive, true);
+      assert.equal(results[0].remaining, 75);
+      assert.deepEqual(authorizations, ["Bearer tok-default"]);
+    });
+  } finally {
+    global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
   }
 });
 
@@ -919,8 +931,8 @@ test("readAccountsWeekly: openai — each discovered account is read with ITS OW
       openaiAccountsFile: accountsFile,
     });
     assert.equal(results.length, 2);
-    const a = results.find((r) => r.accountId === "acc-a");
-    const b = results.find((r) => r.accountId === "acc-b");
+    const a = results.find((r) => r.accountKey === "ox:acc-a");
+    const b = results.find((r) => r.accountKey === "ox:acc-b");
     assert.equal(a.remaining, 40);
     assert.equal(a.label ?? a.accountLabel, "a@x.com (team)");
     assert.equal(a.isActive, false);
@@ -952,7 +964,7 @@ test("readAccountsWeekly: openai — no multi-account store falls back to a sing
         openaiAccountsFile: join(root, "no-such-accounts.json"),
       });
       assert.equal(results.length, 1);
-      assert.equal(results[0].accountId, "default");
+      assert.equal(results[0].accountKey, "oc:default");
       assert.equal(results[0].accountLabel, "OpenAI");
       assert.equal(results[0].isActive, true);
       assert.equal(results[0].remaining, 80);

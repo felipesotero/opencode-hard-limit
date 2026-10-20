@@ -165,8 +165,8 @@ test("chat.params resolves per-provider window: anthropic uses base window, open
       assert.equal(anthropicCall.window, "5h");
       assert.equal(openaiCall.window, "Weekly");
 
-      assert.ok(__test__.seenKeys.has("anthropic:5h"));
-      assert.ok(__test__.seenKeys.has("openai:Weekly"));
+      assert.ok(__test__.seenKeys.has("anthropic:cli:5h"));
+      assert.ok(__test__.seenKeys.has("openai:oc:default:Weekly"));
     });
   } finally {
     __test__.resetQuotaReader();
@@ -182,7 +182,7 @@ test("chat.params throws stale-failsafe message for a seeded backoff cache entry
     join(cacheDir, "quota-cache.json"),
     JSON.stringify(
       {
-        "anthropic:5h": {
+        "anthropic:cli:5h": {
           at: 100_000,
           nextAllowedAt: 800_000,
           result: {
@@ -278,13 +278,13 @@ test("chat.params: claude-pro and claude-max resolve to SEPARATE accounts/cache 
       await plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } });
       await plugin["chat.params"]({ provider: { info: { id: "claude-max" } } });
 
-      const proCall = calls.find((c) => c.accountId === "pro");
-      const maxCall = calls.find((c) => c.accountId === "max");
+      const proCall = calls.find((c) => c.account?.accountKey === "cp:pro");
+      const maxCall = calls.find((c) => c.account?.accountKey === "cp:max");
       assert.ok(proCall, "expected a quotaReader call for the pro account");
       assert.ok(maxCall, "expected a quotaReader call for the max account");
 
-      assert.ok(__test__.seenKeys.has("anthropic:pro:5h"), "expected a distinct cache key for the pro account");
-      assert.ok(__test__.seenKeys.has("anthropic:max:5h"), "expected a distinct cache key for the max account");
+      assert.ok(__test__.seenKeys.has("anthropic:cp:pro:5h"), "expected a distinct cache key for the pro account");
+      assert.ok(__test__.seenKeys.has("anthropic:cp:max:5h"), "expected a distinct cache key for the max account");
     });
   } finally {
     __test__.resetQuotaReader();
@@ -311,8 +311,8 @@ test("chat.params: a generic 'anthropic' provider id keeps the legacy shared cac
       const plugin = await QuotaHardStopPlugin({ directory: proj });
       await plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
 
-      assert.equal(calls[0].accountId, undefined);
-      assert.ok(__test__.seenKeys.has("anthropic:5h"));
+      assert.equal(calls[0].account.accountKey, "cli");
+      assert.ok(__test__.seenKeys.has("anthropic:cli:5h"));
     });
   } finally {
     __test__.resetQuotaReader();
@@ -428,28 +428,44 @@ test("block message omits the postpone hint when allowPostpone is disabled (defa
 });
 
 
-test("chat.params bypasses an in-memory Anthropic entry after account rotation", async () => {
-  const { xdg, proj } = sandbox();
-  const accountsFile = join(xdg, "opencode", "anthropic-multi-account-accounts.json");
-  mkdirSync(join(xdg, "opencode"), { recursive: true });
+test("chat.params refreshes after active Anthropic account rotation without a manual refresh", async () => {
+  const { root, xdg, proj } = sandbox();
+  const home = join(root, "home");
+  const accountsFile = join(root, "anthropic-accounts.json");
   const account = (uuid) => ({ uuid, refreshToken: `refresh-${uuid}`, accessToken: `access-${uuid}`, expiresAt: Date.now() + 3_600_000 });
   writeFileSync(accountsFile, JSON.stringify({ activeAccountUuid: "A", accounts: [account("A"), account("B")] }));
+  const savedFetch = global.fetch;
+  const authorizations = [];
+  global.fetch = async (_url, options) => {
+    authorizations.push(options.headers.Authorization);
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ five_hour: { utilization: 20 } }),
+    };
+  };
   quotaInternals.__resetMultiAccountSticky();
   __test__.clearState();
+  __test__.resetQuotaReader();
   try {
-    await withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: accountsFile }, async () => {
-      const cfg = resolveConfig({ projectDir: proj }).values;
-      let calls = 0;
-      __test__.setQuotaReader(async () => {
-        calls += 1;
-        return okResult(80, { accountKey: calls === 1 ? "ma:A" : "ma:B" });
-      });
-      await __test__.refreshQuota("anthropic", cfg, { window: "5h", force: true });
+    await withEnv({
+      HOME: home,
+      XDG_CONFIG_HOME: xdg,
+      XDG_DATA_HOME: xdg,
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: accountsFile,
+    }, async () => {
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
+      await plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
       writeFileSync(accountsFile, JSON.stringify({ activeAccountUuid: "B", accounts: [account("A"), account("B")] }));
-      await (await QuotaHardStopPlugin({ directory: proj }))["chat.params"]({ provider: { info: { id: "anthropic" } } });
-      assert.equal(calls, 2);
+      quotaInternals.__resetMultiAccountSticky();
+      await plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
+      assert.deepEqual(authorizations, ["Bearer access-A", "Bearer access-B"]);
+      assert.ok(__test__.cache.has("anthropic:ma:A:5h"));
+      assert.ok(__test__.cache.has("anthropic:ma:B:5h"));
     });
   } finally {
+    global.fetch = savedFetch;
     quotaInternals.__resetMultiAccountSticky();
     __test__.resetQuotaReader();
     __test__.clearState();

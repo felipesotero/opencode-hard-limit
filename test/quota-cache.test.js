@@ -72,14 +72,14 @@ function goodResponse(remaining = 80) {
 }
 
 test("fresh cache short-circuits before any fetch", async () => {
-  const { cacheFile, xdg, bin } = sandbox();
+  const { home, cacheFile, xdg, bin } = sandbox();
   writeClaudeStub(bin);
   const entry = {
     at: 1000,
     result: goodResponse(77),
     nextAllowedAt: 0,
   };
-  writeFileSync(cacheFile, JSON.stringify({ "anthropic:Weekly": entry }, null, 2) + "\n", "utf8");
+  writeFileSync(cacheFile, JSON.stringify({ "anthropic:cli:Weekly": entry }, null, 2) + "\n", "utf8");
 
   const savedNow = Date.now;
   Date.now = () => 1500;
@@ -90,8 +90,14 @@ test("fresh cache short-circuits before any fetch", async () => {
     throw new Error("network should not be called");
   };
   try {
-    await withEnv({ OPENCODE_QUOTA_CLAUDE_BIN: bin,
-      XDG_DATA_HOME: xdg, QHL_CLAUDE_MODE: "noWindows" }, async () => {
+    await withEnv({
+      HOME: home,
+      XDG_CONFIG_HOME: xdg,
+      XDG_DATA_HOME: xdg,
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(xdg, "anthropic-accounts.json"),
+      OPENCODE_QUOTA_CLAUDE_BIN: bin,
+      QHL_CLAUDE_MODE: "noWindows",
+    }, async () => {
       const result = await readWeekly({
         provider: "anthropic",
         window: "Weekly",
@@ -128,7 +134,8 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
         HOME: home,
         XDG_CONFIG_HOME: xdg,
         OPENCODE_QUOTA_CLAUDE_BIN: bin,
-      XDG_DATA_HOME: xdg,
+        XDG_DATA_HOME: xdg,
+        OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(xdg, "anthropic-accounts.json"),
         QHL_CLAUDE_MODE: "good",
       },
       async () => {
@@ -146,7 +153,7 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
         assert.equal(first.stale, undefined);
         assert.equal(first.backoffUntil, undefined);
 
-        const before = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"];
+        const before = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"];
         assert.equal(before.result.remaining, 90);
         assert.equal(before.nextAllowedAt, 0);
 
@@ -178,7 +185,7 @@ test("429 preserves last-known-good, sets nextAllowedAt, and honors Retry-After"
           assert.equal(second.backoffUntil, 12000);
           assert.equal(fetchCalls, 1);
 
-          const after = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"];
+          const after = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"];
           assert.equal(after.result.remaining, 90);
           assert.equal(after.nextAllowedAt, 12_000);
 
@@ -221,7 +228,8 @@ test("429 without LKG returns ratelimit error and backoffUntil", async () => {
         HOME: home,
         XDG_CONFIG_HOME: xdg,
         OPENCODE_QUOTA_CLAUDE_BIN: bin,
-      XDG_DATA_HOME: xdg,
+        XDG_DATA_HOME: xdg,
+        OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(xdg, "anthropic-accounts.json"),
         QHL_CLAUDE_MODE: "noWindows",
       },
       async () => {
@@ -245,7 +253,7 @@ test("429 without LKG returns ratelimit error and backoffUntil", async () => {
         assert.equal(result.ok, false);
         assert.equal(result.errorKind, "ratelimit");
         assert.equal(result.backoffUntil, 8000);
-        const after = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"];
+        const after = JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"];
         assert.equal(after.nextAllowedAt, 8000);
       },
     );
@@ -266,6 +274,7 @@ test("cacheFile null skips file I/O", async () => {
       XDG_CONFIG_HOME: xdg,
       OPENCODE_QUOTA_CLAUDE_BIN: bin,
       XDG_DATA_HOME: xdg,
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(xdg, "anthropic-accounts.json"),
       QHL_CLAUDE_MODE: "good",
       OPENCODE_QUOTA_CACHE_FILE: undefined,
     },
