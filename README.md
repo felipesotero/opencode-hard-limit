@@ -36,7 +36,10 @@ npx opencode-hard-limit init --global --threshold 30 --install
 
 Then **restart OpenCode**. That is it.
 
-`install` does two things:
+This is all you need if you use one Claude account and one OpenAI account. If
+you switch between several logins, see [Multi-account](#multi-account).
+
+`install` does three things:
 
 1. **Registers the server plugin:** writes `"opencode-hard-limit"` into
    `~/.config/opencode/opencode.json`. OpenCode reads this on every startup and
@@ -80,6 +83,28 @@ token of its own. Answering either way is remembered in
 again. To never see it: pass `--no-star`, or set `OPENCODE_QUOTA_NO_STAR=1`
 (`CI` is honored too). Without `gh` installed or authenticated it just prints
 the URL.
+
+## What's new in 0.18.0
+
+With a single account, nothing changes for you: no new setup, same `threshold`.
+The release adds:
+
+- **Multi-account quota.** Named Claude profiles and OpenAI account stores are
+  read per account, the gate checks the account that serves each request, and the
+  sidebar shows one row per account. See [Multi-account](#multi-account).
+- **Gentler 429 handling.** A server-sent `Retry-After` is capped
+  (`maxRateLimitBackoffMs`, 10 min; `noBaselineRateLimitBackoffMs`, 1 min when
+  there is no earlier reading).
+- **A transient error no longer blocks on its own.** On a timeout, 5xx, or
+  malformed response the gate keeps using the last good reading. It blocks only
+  when that reading is below the threshold, or when it is too old and close to
+  the threshold (the stale fail-safe, see `staleBlockMarginPct`).
+- **Expired profile tokens pass through.** A named Claude profile whose OAuth
+  token has expired is allowed through with a warning, so the call itself can
+  renew the token.
+- **`warm` and `warm --watch`.** Opt-in commands that keep idle Claude profiles
+  logged in. They never run unless you call them. See
+  [`warm`](#refreshing-idle-claude-profiles-warm).
 
 ## Updating
 
@@ -212,6 +237,10 @@ It reads the **same** threshold and window as the hard-stop (no extra config),
 polls every 120s by default (`OPENCODE_QUOTA_SIDEBAR_POLL_MS` override), and
 appears after you restart OpenCode.
 
+With several accounts the sidebar shows one row per account, labeled with the
+account name (see [Multi-account](#multi-account)). Rows for accounts that
+disappear are removed on the next refresh.
+
 <details>
 <summary>Why the widget ships as raw <code>.tsx</code> (not bundled)</summary>
 
@@ -226,8 +255,44 @@ runtime deps exist in `~/.config/opencode/`.
 
 ## Multi-account
 
+**Only read this if you use more than one Claude or OpenAI account.** With a
+single account, the [Quick start](#quick-start) is all you need and nothing on
+this page applies to you.
+
 The plugin can read multiple Claude and OpenAI accounts from their local account
-stores. It does not require the companion account-management plugins.
+stores. It never creates or logs in accounts itself, and it does not depend on
+any account-management plugin. It only reads what those tools leave on disk:
+
+- **Claude, one login per profile.** A plugin such as
+  [`@openchamber/opencode-claude`](https://www.npmjs.com/package/@openchamber/opencode-claude)
+  runs several isolated Claude Code logins, one instance per profile, each with
+  its own `CLAUDE_CONFIG_DIR` (for example `~/.claude-profiles/pro` and
+  `~/.claude-profiles/max`). Each instance registers a provider ID such as
+  `claude-pro` or `claude-max`.
+- **Claude, rotating accounts.** A manager plugin that keeps a single
+  `anthropic` provider and switches the active account can write a store at
+  `~/.config/opencode/anthropic-multi-account-accounts.json`. If that file
+  exists, the plugin follows whichever account is marked active
+  (`activeAccountUuid`). Set `anthropicAccountsFile` to use another path.
+- **OpenAI.** [`oc-codex-multi-auth`](https://www.npmjs.com/package/oc-codex-multi-auth)
+  keeps its accounts in `~/.opencode/oc-codex-multi-auth-accounts.json`.
+
+### Set up named Claude profiles
+
+1. Create one profile per login with your account plugin, so that each profile
+   ends up with its own `.credentials.json`, for example
+   `~/.claude-profiles/pro/.credentials.json`. The directory name after
+   `~/.claude-profiles/` is the profile slug.
+2. Make sure the provider ID of each profile ends with its slug:
+   `claude-pro` is checked against profile `pro`, `claude-max` against `max`.
+3. Run `opencode-hard-limit accounts` and confirm every profile is listed with
+   its remaining quota.
+4. Restart OpenCode. The sidebar now shows one row per account.
+
+Nothing else is required: profile mode switches on by itself as soon as one
+named profile is found, or when you set `anthropicProfileDirs`.
+
+### What is read where
 
 - **Claude profiles:** each named profile lives at
   `~/.claude-profiles/<slug>/.credentials.json`. Configure other locations with
@@ -280,6 +345,33 @@ current model call through. That call can refresh the profile's OAuth token,
 avoiding a blocked request that would otherwise be responsible for renewing
 its own credentials. The warning is rate-limited to once per profile every ten
 minutes.
+
+### Troubleshooting multi-account
+
+- **`quota check failed (no Claude profile "foo")`.** You use a `claude-foo`
+  provider while profile mode is on, but there is no profile `foo`. Create it
+  at `~/.claude-profiles/foo/.credentials.json`, add its directory to
+  `anthropicProfileDirs`, or rename the provider so the slug matches. The gate
+  follows `blockOnError`, which blocks by default; `--block-on-error false`
+  lets the call through instead. Provider IDs are lowercased before matching, so
+  use lowercase profile directory names.
+- **A profile is missing from `accounts`.** Only profiles with a readable
+  `.credentials.json` on disk are listed. On macOS the Claude CLI may keep its
+  login in the Keychain instead of a file; such a profile is not discovered. Two
+  directories holding the same refresh token count as one profile.
+- **A profile shows 401 or `unavailable`.** Its access token expired and nothing
+  has used the profile since. Run any call through it, or see
+  [`warm`](#refreshing-idle-claude-profiles-warm).
+- **Another `claude-*` provider (for example `claude-code`) is blocked.** In
+  profile mode every `claude-<slug>` provider must match a profile, so one that
+  is not a profile gets the same `no Claude profile` error. Either add a profile
+  with that slug or set `--block-on-error false`. Without any named profile,
+  `claude-*` IDs use the normal single-account sources and this does not
+  happen.
+- **Nothing changes with several OpenAI accounts.** Check that
+  `oc-codex-multi-auth-accounts.json` exists at the default path or that
+  `openaiAccountsFile` points to it, and that the store has an active account.
+  Then run `opencode-hard-limit accounts` again.
 
 ## Refreshing idle Claude profiles: `warm`
 
@@ -404,6 +496,9 @@ is no guessing.
 | `--no-baseline-rate-limit-backoff` | `OPENCODE_QUOTA_NO_BASELINE_RATE_LIMIT_BACKOFF_MS` | `noBaselineRateLimitBackoffMs` | `60000` | Tighter cap on a server-sent `Retry-After` when no last-known-good reading is available. It does not cap the local `--rate-limit-backoff` value. |
 | `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*`; no default `~/.claude` discovery)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
 | `--openai-accounts-file` | `OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE` | `openaiAccountsFile` | *(auto: `~/.opencode/oc-codex-multi-auth-accounts.json`)* | Path to a multi-account OpenAI/Codex store. |
+| `--stale-margin` | `OPENCODE_QUOTA_STALE_BLOCK_MARGIN` | `staleBlockMarginPct` | `10` | Extra block margin (in percentage points, 0 to 100) applied while quota is blind or stale. A stale reading within this margin of your threshold blocks as a precaution. `0` disables the stale fail-safe. |
+| *(no flag)* | `OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE` | `anthropicAccountsFile` | *(auto: `<opencode config dir>/anthropic-multi-account-accounts.json`)* | Store of a rotating-account Anthropic manager plugin. The plugin's `activeAccountUuid` decides which account is read. Only matters if you use such a plugin. |
+| *(no flag)* | `OPENCODE_QUOTA_ANTHROPIC_CRED_SOURCE` | `anthropicCredentialSource` | `auto` | Where to read the Claude credential when no named profile applies. `auto` tries the managed-account store, then OpenCode's own Anthropic login, then the `claude` CLI. `opencode-auth` skips the managed-account store and uses OpenCode's Anthropic login. `claude-cli` only uses the local `claude` CLI or keychain. Named profiles ignore this setting. |
 
 Sidebar polling:
 
@@ -435,13 +530,16 @@ opencode-hard-limit set --allow-postpone true --global
 Once enabled, a block's error message includes a hint like:
 
 ```
-[quota-hard-stop] Blocked anthropic (anthropic): quota 12% remaining is below
-the 30% threshold. ... To postpone this block: in OpenCode, type ! by itself
-first to enter shell mode. Pasting a whole "!opencode-hard-limit ..." line at
-once will not trigger it, so type the ! yourself, then paste the rest. Run:
-opencode-hard-limit postpone <minutes> (default 30, e.g. "opencode-hard-limit
-postpone 60"). This has no LLM cost.
+[quota-hard-stop] Blocked claude-max (anthropic:cp:max (Claude Max)): quota 12%
+remaining is below the 30% threshold. ... To postpone this block: in OpenCode,
+type ! by itself first to enter shell mode. Pasting a whole
+"!opencode-hard-limit ..." line at once will not trigger it, so type the !
+yourself, then paste the rest. Run: opencode-hard-limit postpone <minutes>
+(default 30, e.g. "opencode-hard-limit postpone 60"). This has no LLM cost.
 ```
+
+The part in parentheses names the account that was read. With a single account
+it is short, for example `Blocked anthropic (anthropic)`.
 
 **Important: type the `!`, don't paste it.** OpenCode only enters shell mode
 when `!` is the first character *typed* into an empty prompt. If you copy the
