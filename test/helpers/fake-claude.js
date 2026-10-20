@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Create a fake Claude CLI executable for isolated, cost-free tests. */
-export function makeFakeClaude(binDir, { logFile, mode = "refresh" } = {}) {
+export function makeFakeClaude(binDir, { logFile, invocationFile, mode = "refresh" } = {}) {
   mkdirSync(binDir, { recursive: true });
   const binaryPath = join(binDir, "claude");
   const script = `#!${process.execPath}
@@ -11,7 +11,9 @@ export function makeFakeClaude(binDir, { logFile, mode = "refresh" } = {}) {
   const path = await import("node:path");
   const mode = ${JSON.stringify(mode)};
   const logFile = ${JSON.stringify(logFile || "")};
+  const invocationFile = ${JSON.stringify(invocationFile || "")};
   const args = process.argv.slice(2);
+  if (invocationFile) fs.appendFileSync(invocationFile, JSON.stringify({ argv: args }) + "\\n");
 
   if (args[0] === "--version") {
     process.stdout.write("2.1.302 (Claude Code)\\n");

@@ -45,3 +45,20 @@ for (const entry of ["bin/cli.js", "quota-hard-stop.js"]) {
     assert.deepEqual(missing, [], `not shipped in the npm tarball: ${missing.join(", ")}`);
   });
 }
+
+test("warm modules ship with the CLI but stay outside the sidebar bundle", () => {
+  const warmModules = [
+    "lib/claude-warm.js",
+    "lib/warm-schedule.js",
+    "lib/warm-watch.js",
+  ];
+  const shipped = new Set(pkg.files);
+  const sidebarLibs = new Set(SIDEBAR_LIB_FILES.map((file) => `lib/${file}`));
+  const sidebarImports = collectImports("quota-sidebar.tsx");
+  const cliImports = collectImports("bin/cli.js");
+
+  assert.deepEqual(warmModules.filter((file) => !shipped.has(file)), []);
+  assert.deepEqual(warmModules.filter((file) => sidebarLibs.has(file)), []);
+  assert.deepEqual(warmModules.filter((file) => sidebarImports.has(file)), []);
+  assert.deepEqual([...cliImports].filter((file) => !shipped.has(file)), []);
+});
