@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 import { makeFakeClaude } from "./helpers/fake-claude.js";
+import { readClaudeCredentialState } from "../lib/quota.js";
 import {
   acquireWarmLock,
   DEFAULT_WARM_MODEL,
@@ -103,6 +104,21 @@ function completeSpawn({
 function readLogLines(logFile) {
   return readFileSync(logFile, "utf8").trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
+
+test("readClaudeCredentialState: returns normalized OAuth state and null for unreadable files", async (t) => {
+  const root = sandbox(t);
+  const profile = makeProfile(join(root, "profiles", "pro"));
+  writeCredentials(profile.configDir, { expiresAt: 1000, refreshToken: " refresh-token " });
+
+  assert.deepEqual(await readClaudeCredentialState(profile.credentialsPath), {
+    accessToken: "access-token",
+    expiresAt: 1000,
+    hasRefreshToken: true,
+  });
+  assert.equal(await readClaudeCredentialState(join(root, "missing.credentials.json")), null);
+  writeFileSync(profile.credentialsPath, "{");
+  assert.equal(await readClaudeCredentialState(profile.credentialsPath), null);
+});
 
 test("warmClaudeAccounts: missing CLI or profiles returns an empty result", async () => {
   assert.deepEqual(await warmClaudeAccounts({ profiles: [{ id: "pro" }] }), []);

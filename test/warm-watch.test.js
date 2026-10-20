@@ -1,218 +1,210 @@
 // test/warm-watch.test.js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { tickWarmSchedule } from "../lib/warm-watch.js";
+import { BACKOFF_BASE_MS, DEFAULT_IDLE_INTERVAL_MS } from "../lib/warm-schedule.js";
+import { runWarmWatch, tickWarmSchedule } from "../lib/warm-watch.js";
 
-function sandbox() {
-  return mkdtempSync(join(tmpdir(), "qhl-warm-watch-"));
+const NOW = Date.parse("2026-10-02T12:00:00Z");
+
+function sandbox(t) {
+  const root = mkdtempSync(join(tmpdir(), "qhl-warm-watch-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return root;
 }
 
-function writeCredentials(dir) {
+function writeCredentials(dir, {
+  accessToken = "access-token",
+  expiresAt = NOW + 60 * 60_000,
+  refreshToken = `${dir}-refresh`,
+} = {}) {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok", refreshToken: dir } }), "utf8");
+  const credentialsPath = join(dir, ".credentials.json");
+  writeFileSync(credentialsPath, JSON.stringify({
+    claudeAiOauth: { accessToken, expiresAt, refreshToken },
+  }), "utf8");
+  return credentialsPath;
 }
 
-function fakeStat(mtimesByPath) {
-  return (path) => {
-    if (!(path in mtimesByPath)) throw new Error(`ENOENT: ${path}`);
-    return { mtimeMs: mtimesByPath[path] };
-  };
-}
-
-function quotaReaderReturning(entries) {
-  return async () => entries;
-}
-
-test("tickWarmSchedule: no accounts discovered -> empty results, nextTickAt is now + idleInterval", async () => {
-  const root = sandbox();
-  const now = Date.parse("2026-10-02T12:00:00Z");
-  const { results, nextTickAt } = await tickWarmSchedule({
-    cliPath: "claude",
-    profileDirs: [join(root, "nope")],
-    now,
-    idleIntervalMs: 1000,
-  });
-  assert.deepEqual(results, []);
-  assert.equal(nextTickAt, now + 1000);
-});
-
-test("tickWarmSchedule: idle account gets warmed, state records its post-warm mtime", async () => {
-  const root = sandbox();
-  const pro = join(root, "profiles", "pro");
-  writeCredentials(pro);
-  const credPath = join(pro, ".credentials.json");
-  const now = Date.parse("2026-10-02T12:00:00Z");
-
-  const warmCalls = [];
-  const warmFn = async ({ profileDirs }) => {
-    warmCalls.push(profileDirs);
-    return [{ id: "pro", label: "Claude Pro", ok: true, costUsd: 0.01 }];
-  };
-
-  const state = new Map();
-  const { results, nextTickAt } = await tickWarmSchedule({
-    cliPath: "claude",
-    profileDirs: [pro],
-    now,
-    idleIntervalMs: 60_000,
-    quotaReader: quotaReaderReturning([{ accountKey: "cp:pro", ok: true, remaining: 80, resetAt: null }]),
-    warmFn,
-    statFn: fakeStat({ [credPath]: 10 }),
-    state,
-  });
-
-  assert.equal(warmCalls.length, 1);
-  assert.deepEqual(warmCalls[0], [pro]);
-  assert.equal(results.length, 1);
-  assert.equal(results[0].action, "warm");
-  assert.equal(results[0].reason, "idle");
-  assert.equal(results[0].warmResult.ok, true);
-  assert.equal(nextTickAt, now + 60_000);
-  assert.deepEqual(state.get("pro"), { mtimeMs: 10 });
-});
-
-test("tickWarmSchedule: in-use account (mtime advanced since last state) is skipped, not warmed", async () => {
-  const root = sandbox();
-  const pro = join(root, "profiles", "pro");
-  writeCredentials(pro);
-  const credPath = join(pro, ".credentials.json");
-  const now = Date.parse("2026-10-02T12:00:00Z");
-
-  const warmFn = async () => { throw new Error("warmFn must not be called"); };
-
-  const state = new Map([["pro", { mtimeMs: 10 }]]);
-  const { results } = await tickWarmSchedule({
-    cliPath: "claude",
-    profileDirs: [pro],
-    now,
-    quotaReader: quotaReaderReturning([{ accountKey: "cp:pro", ok: true, remaining: 80, resetAt: null }]),
-    warmFn,
-    statFn: fakeStat({ [credPath]: 200 }), // advanced since the recorded 10
-    state,
-  });
-
-  assert.equal(results[0].action, "skip");
-  assert.equal(results[0].reason, "in-use");
-  assert.deepEqual(state.get("pro"), { mtimeMs: 200 });
-});
-
-test("tickWarmSchedule: exhausted account with a known reset is skipped until just past reset", async () => {
-  const root = sandbox();
-  const pro = join(root, "profiles", "pro");
-  writeCredentials(pro);
-  const credPath = join(pro, ".credentials.json");
-  const now = Date.parse("2026-10-02T12:00:00Z");
-  const resetAt = new Date(now + 75 * 60_000).toISOString();
-
-  const warmFn = async () => { throw new Error("warmFn must not be called"); };
-
-  const { results, nextTickAt } = await tickWarmSchedule({
-    cliPath: "claude",
-    profileDirs: [pro],
-    now,
-    postResetBufferMs: 60_000,
-    quotaReader: quotaReaderReturning([{ accountKey: "cp:pro", ok: true, remaining: 0, resetAt }]),
-    warmFn,
-    statFn: fakeStat({ [credPath]: 10 }),
-  });
-
-  assert.equal(results[0].action, "skip");
-  assert.equal(results[0].reason, "exhausted");
-  assert.equal(Math.round((nextTickAt - now) / 60_000), 76);
-});
-
-test("tickWarmSchedule: quotaReader throwing is swallowed, account still ticks (treated as idle)", async () => {
-  const root = sandbox();
-  const pro = join(root, "profiles", "pro");
-  writeCredentials(pro);
-  const credPath = join(pro, ".credentials.json");
-  const now = Date.parse("2026-10-02T12:00:00Z");
-
-  const { results } = await tickWarmSchedule({
-    cliPath: "claude",
-    profileDirs: [pro],
-    now,
-    quotaReader: async () => { throw new Error("usage endpoint down"); },
-    warmFn: async () => [{ id: "pro", label: "Claude Pro", ok: true, costUsd: 0.01 }],
-    statFn: fakeStat({ [credPath]: 10 }),
-  });
-
-  assert.equal(results[0].action, "warm");
-});
-
-test("tickWarmSchedule: no cliPath -> decisions still computed, but warm is never invoked", async () => {
-  const root = sandbox();
-  const pro = join(root, "profiles", "pro");
-  writeCredentials(pro);
-  const credPath = join(pro, ".credentials.json");
-  const now = Date.parse("2026-10-02T12:00:00Z");
-
-  const warmFn = async () => { throw new Error("warmFn must not be called"); };
-
-  const { results } = await tickWarmSchedule({
-    cliPath: undefined,
-    profileDirs: [pro],
-    now,
-    quotaReader: quotaReaderReturning([{ accountKey: "cp:pro", ok: true, remaining: 80, resetAt: null }]),
-    warmFn,
-    statFn: fakeStat({ [credPath]: 10 }),
-  });
-
-  assert.equal(results[0].action, "warm");
-  assert.equal(results[0].warmResult, null);
-});
-
-test("tickWarmSchedule: unreadable credentials file is treated as 'just changed', not a crash", async () => {
-  const root = sandbox();
-  const pro = join(root, "profiles", "pro");
-  writeCredentials(pro);
-  const now = Date.parse("2026-10-02T12:00:00Z");
-
-  const { results } = await tickWarmSchedule({
-    cliPath: "claude",
-    profileDirs: [pro],
-    now,
-    quotaReader: quotaReaderReturning([{ accountKey: "cp:pro", ok: true, remaining: 80, resetAt: null }]),
-    warmFn: async () => [{ id: "pro", label: "Claude Pro", ok: true, costUsd: 0.01 }],
-    statFn: () => { throw new Error("ENOENT"); },
-  });
-
-  assert.equal(results.length, 1);
-  assert.ok(results[0].action === "warm" || results[0].action === "skip");
-});
-
-test("tickWarmSchedule: multiple accounts each get their own decision; nextTickAt is the earliest", async () => {
-  const root = sandbox();
+test("tickWarmSchedule: warms only the expired profile among two discovered profiles", async (t) => {
+  const root = sandbox(t);
   const pro = join(root, "profiles", "pro");
   const max = join(root, "profiles", "max");
-  writeCredentials(pro);
-  writeCredentials(max);
-  const proCred = join(pro, ".credentials.json");
-  const maxCred = join(max, ".credentials.json");
-  const now = Date.parse("2026-10-02T12:00:00Z");
-  const resetAt = new Date(now + 75 * 60_000).toISOString();
+  writeCredentials(pro, { expiresAt: NOW - 1 });
+  writeCredentials(max, { expiresAt: NOW + 2 * 60 * 60_000 });
+  const warmCalls = [];
 
-  const { results, nextTickAt } = await tickWarmSchedule({
-    cliPath: "claude",
+  const result = await tickWarmSchedule({
+    cliPath: "/sandbox/claude",
     profileDirs: [pro, max],
-    now,
-    idleIntervalMs: 60_000,
-    quotaReader: quotaReaderReturning([
-      { accountKey: "cp:pro", ok: true, remaining: 0, resetAt }, // exhausted -> ~76min out
-      { accountKey: "cp:max", ok: true, remaining: 80, resetAt: null }, // idle -> warm, 1min out
-    ]),
-    warmFn: async () => [{ id: "max", label: "Claude Max", ok: true, costUsd: 0.01 }],
-    statFn: fakeStat({ [proCred]: 10, [maxCred]: 10 }),
+    now: NOW,
+    warmFn: async ({ profiles }) => {
+      warmCalls.push(profiles.map((profile) => profile.id));
+      return [{ ok: true, refreshed: true }];
+    },
   });
 
-  assert.equal(results.length, 2);
-  const proResult = results.find((r) => r.id === "pro");
-  const maxResult = results.find((r) => r.id === "max");
-  assert.equal(proResult.action, "skip");
-  assert.equal(maxResult.action, "warm");
-  assert.equal(nextTickAt, now + 60_000); // the earlier of the two
+  assert.equal(result.profileMode, true);
+  assert.deepEqual(warmCalls, [["pro"]]);
+  assert.equal(result.results.find((entry) => entry.id === "pro").reason, "expired");
+  assert.equal(result.results.find((entry) => entry.id === "max").reason, "fresh");
+  assert.equal(result.nextTickAt, NOW + DEFAULT_IDLE_INTERVAL_MS);
+});
+
+test("tickWarmSchedule: a readable fresh profile stays unwarmed across ten idle scans", async (t) => {
+  const root = sandbox(t);
+  const pro = join(root, "profiles", "pro");
+  writeCredentials(pro, { expiresAt: NOW + 24 * 60 * 60_000 });
+  const state = new Map();
+  let warmCalls = 0;
+
+  for (let tick = 0; tick < 10; tick += 1) {
+    await tickWarmSchedule({
+      cliPath: "/sandbox/claude",
+      profileDirs: [pro],
+      state,
+      now: NOW + tick * DEFAULT_IDLE_INTERVAL_MS,
+      warmFn: async () => { warmCalls += 1; throw new Error("fresh profile must not warm"); },
+    });
+  }
+
+  assert.equal(warmCalls, 0);
+});
+
+test("tickWarmSchedule: failed warms back off per profile for five minutes, then ten", async (t) => {
+  const root = sandbox(t);
+  const pro = join(root, "profiles", "pro");
+  writeCredentials(pro, { expiresAt: NOW - 1 });
+  const state = new Map();
+  let warmCalls = 0;
+  const warmFn = async () => {
+    warmCalls += 1;
+    return [{ ok: false, error: "credential was not refreshed" }];
+  };
+  const tick = (now) => tickWarmSchedule({
+    cliPath: "/sandbox/claude",
+    profileDirs: [pro],
+    state,
+    now,
+    warmFn,
+  });
+
+  await tick(NOW);
+  assert.deepEqual(state.get("cp:pro"), { failures: 1, backoffUntil: NOW + BACKOFF_BASE_MS });
+
+  const duringBackoff = await tick(NOW + BACKOFF_BASE_MS - 1);
+  assert.equal(duringBackoff.results[0].reason, "backoff");
+  assert.equal(warmCalls, 1);
+
+  const retried = await tick(NOW + BACKOFF_BASE_MS);
+  assert.equal(retried.results[0].action, "warm");
+  assert.deepEqual(state.get("cp:pro"), {
+    failures: 2,
+    backoffUntil: NOW + BACKOFF_BASE_MS + 2 * BACKOFF_BASE_MS,
+  });
+  assert.equal(warmCalls, 2);
+});
+
+test("tickWarmSchedule: settings overrides are skipped without counting as failures", async (t) => {
+  const root = sandbox(t);
+  const pro = join(root, "profiles", "pro");
+  writeCredentials(pro, { expiresAt: NOW - 1 });
+  const state = new Map();
+
+  const result = await tickWarmSchedule({
+    cliPath: "/sandbox/claude",
+    profileDirs: [pro],
+    state,
+    now: NOW,
+    warmFn: async () => ({ ok: false, reason: "settings-override" }),
+  });
+
+  assert.equal(result.results[0].action, "skip");
+  assert.equal(result.results[0].reason, "settings-override");
+  assert.equal(state.has("cp:pro"), false);
+});
+
+test("tickWarmSchedule: the default ~/.claude credentials do not enable profile mode", async (t) => {
+  const root = sandbox(t);
+  writeCredentials(join(root, ".claude"), { expiresAt: NOW - 1 });
+  const originalHome = process.env.HOME;
+  process.env.HOME = root;
+
+  try {
+    const result = await tickWarmSchedule({
+      now: NOW,
+      warmFn: async () => { throw new Error("default Claude credentials must not warm"); },
+    });
+
+    assert.equal(result.profileMode, false);
+    assert.deepEqual(result.results, []);
+    assert.equal(result.nextTickAt, NOW + DEFAULT_IDLE_INTERVAL_MS);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  }
+});
+
+test("runWarmWatch: logs a failed tick and continues after its own backoff", async () => {
+  const controller = new AbortController();
+  const logMessages = [];
+  const sleepDurations = [];
+  let ticks = 0;
+
+  await runWarmWatch({
+    signal: controller.signal,
+    tick: async () => {
+      ticks += 1;
+      if (ticks === 1) throw new Error("tick failed");
+      controller.abort();
+      return { nextTickAt: Date.now() };
+    },
+    sleep: async (duration) => { sleepDurations.push(duration); },
+    log: (message) => logMessages.push(message),
+  });
+
+  assert.equal(ticks, 2);
+  assert.deepEqual(logMessages, ["tick failed"]);
+  assert.ok(sleepDurations[0] >= BACKOFF_BASE_MS);
+});
+
+test("runWarmWatch: invalid or past deadlines sleep at least one second", async () => {
+  const controller = new AbortController();
+  const sleepDurations = [];
+  let ticks = 0;
+
+  await runWarmWatch({
+    signal: controller.signal,
+    tick: async () => ({ nextTickAt: ticks++ === 0 ? Number.NaN : Date.now() - 10_000 }),
+    sleep: async (duration) => {
+      sleepDurations.push(duration);
+      if (sleepDurations.length === 2) controller.abort();
+    },
+  });
+
+  assert.equal(sleepDurations.length, 2);
+  assert.ok(sleepDurations.every((duration) => duration >= 1_000));
+});
+
+test("runWarmWatch: aborting during the real sleep exits without another tick", async () => {
+  const controller = new AbortController();
+  let ticks = 0;
+  const abortTimer = setTimeout(() => controller.abort(), 10);
+
+  try {
+    await runWarmWatch({
+      signal: controller.signal,
+      tick: async () => {
+        ticks += 1;
+        return { nextTickAt: Date.now() + DEFAULT_IDLE_INTERVAL_MS };
+      },
+    });
+  } finally {
+    clearTimeout(abortTimer);
+  }
+
+  assert.equal(ticks, 1);
 });
