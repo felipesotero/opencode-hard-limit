@@ -443,7 +443,9 @@ async function main() {
     }
     print("");
     print("Verify effective config with: opencode-hard-limit get");
-    await askToStarRepo({ pkgRoot: PKG_ROOT, noStar: values["no-star"], confirm: confirmYes, print });
+    if (cmd === "init") {
+      await askToStarRepo({ pkgRoot: PKG_ROOT, noStar: values["no-star"], confirm: confirmYes, print });
+    }
     return;
   }
 
