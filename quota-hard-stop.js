@@ -26,6 +26,7 @@ import { isPostponeActive } from "./lib/postpone.js";
 const cache = new Map(); // "provider:accountKey:window" -> { at, result, ttl }
 const inflight = new Map(); // cache key -> Promise (dedupe concurrent checks)
 const seenKeys = new Map(); // cache key -> { provider, providerId, window }
+const expiredProfileWarnings = new Map(); // profile slug -> last warning timestamp
 const ERROR_TTL_CAP_MS = 10000; // cap transient failures; stale entries can be background-refreshed
 let quotaReader = readWeekly;
 let cliInstaller = ensureCliInstalled;
@@ -104,8 +105,12 @@ async function refreshQuota(
   })
     .then((result) => {
       const finishedAt = Date.now();
-      const at = typeof result?.receivedAt === "number" ? result.receivedAt : finishedAt;
-      const ttl = result.ok ? cfg.cacheTtlMs : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
+      const at = result?.stale === true
+        ? finishedAt
+        : typeof result?.receivedAt === "number" ? result.receivedAt : finishedAt;
+      const ttl = result?.stale === true
+        ? Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS)
+        : result.ok ? cfg.cacheTtlMs : Math.min(cfg.cacheTtlMs, ERROR_TTL_CAP_MS);
       cache.set(key, { at, result, ttl });
       return result;
     })
@@ -123,7 +128,7 @@ function humanReason(reason, fallback) {
   return i >= 0 ? reason.slice(i + 1) : fallback;
 }
 
-export const QuotaHardStopPlugin = async ({ directory } = {}) => {
+export const QuotaHardStopPlugin = async ({ directory, client } = {}) => {
   ensureTuiDeployed();
   cliInstaller();
   setTimeout(() => { try { cleanupLegacyCopies(); } catch {} }, 30_000).unref?.();
@@ -147,6 +152,30 @@ export const QuotaHardStopPlugin = async ({ directory } = {}) => {
         anthropicProfileDirs: cfg.anthropicProfileDirs,
         openaiAccountsFile: cfg.openaiAccountsFile,
       });
+      if (
+        account.accountKey.startsWith("cp:") &&
+        !account.error &&
+        Number.isFinite(account.credential?.expiresAt) &&
+        account.credential.expiresAt <= Date.now()
+      ) {
+        const slug = account.accountKey.slice(3);
+        const now = Date.now();
+        const warnedAt = expiredProfileWarnings.get(slug);
+        if (warnedAt === undefined || now - warnedAt >= 10 * 60 * 1000) {
+          expiredProfileWarnings.set(slug, now);
+          try {
+            client?.app?.log?.({
+              body: {
+                service: "opencode-hard-limit",
+                level: "warn",
+                message: `${account.label} profile token is expired; this call will renew it.`,
+              },
+            });
+          } catch {}
+        }
+        return;
+      }
+
       const key = cacheKey(quotaProvider, account.accountKey, quotaWindow);
       seenKeys.set(key, { provider: quotaProvider, providerId, window: quotaWindow });
 
@@ -262,6 +291,7 @@ QuotaHardStopPlugin.__test__ = {
     cache.clear();
     inflight.clear();
     seenKeys.clear();
+    expiredProfileWarnings.clear();
     quotaReader = readWeekly;
   },
   setQuotaReader(fn) {

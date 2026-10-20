@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -153,6 +154,105 @@ process.exit(1);
 `, "utf8");
   chmodSync(file, 0o755);
 }
+
+test("[D2] a last-known-good value from ma:A never crosses to ma:B", async () => {
+  const box = sandbox();
+  const account = (uuid, accessToken) => ({
+    uuid,
+    refreshToken: `refresh-${uuid}`,
+    accessToken,
+    expiresAt: Date.now() + 3_600_000,
+  });
+  writeFileSync(box.accountsFile, JSON.stringify({
+    activeAccountUuid: "A",
+    accounts: [account("A", "access-A"), account("B", "access-B")],
+  }), "utf8");
+  const authorizations = [];
+
+  await withSandbox(box, async () => {
+    global.fetch = async (_url, options) => {
+      authorizations.push(options.headers.Authorization);
+      if (authorizations.length === 1) return writeUsageResponse(20);
+      return { ok: false, status: 500, headers: { get: () => null }, text: async () => "upstream failure" };
+    };
+    const options = {
+      provider: "anthropic",
+      providerId: "anthropic",
+      window: "5h",
+      cacheFile: box.cacheFile,
+      timeoutMs: 1000,
+    };
+
+    const fromA = await readWeekly(options);
+    assert.equal(fromA.accountKey, "ma:A");
+    assert.equal(fromA.ok, true);
+
+    writeFileSync(box.accountsFile, JSON.stringify({
+      activeAccountUuid: "B",
+      accounts: [account("A", "access-A"), account("B", "access-B")],
+    }), "utf8");
+    __internals.__resetMultiAccountSticky();
+
+    const fromB = await readWeekly(options);
+    assert.equal(fromB.accountKey, "ma:B");
+    assert.equal(fromB.ok, false);
+    assert.equal(fromB.remaining, null);
+    assert.equal(fromB.stale, undefined);
+    assert.deepEqual(authorizations, ["Bearer access-A", "Bearer access-B"]);
+
+    const cache = readCache(box.cacheFile);
+    assert.equal(cache["anthropic:ma:A:5h"].result.remaining, 80);
+    assert.equal(cache["anthropic:ma:B:5h"].result.ok, false);
+  });
+});
+
+test("[D2] an unknown profile resolver error never serves the profile's old LKG", async () => {
+  const box = sandbox();
+  const profileDir = join(box.root, "profiles", "ghost");
+  const credentialsPath = join(profileDir, ".credentials.json");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(credentialsPath, JSON.stringify({ claudeAiOauth: { accessToken: "tok-ghost" } }), "utf8");
+  const authorizations = [];
+  const savedNow = Date.now;
+  let now = 1_000;
+  Date.now = () => now;
+
+  try {
+    await withSandbox(box, async () => {
+      global.fetch = async (_url, options) => {
+        authorizations.push(options.headers.Authorization);
+        return writeUsageResponse(20);
+      };
+      const options = {
+        provider: "anthropic",
+        providerId: "claude-ghost",
+        anthropicProfileDirs: [profileDir],
+        window: "5h",
+        cacheFile: box.cacheFile,
+        cacheTtlMs: 1,
+        minRefreshIntervalMs: 1,
+        timeoutMs: 1000,
+      };
+
+      const first = await readWeekly(options);
+      assert.equal(first.ok, true);
+      assert.equal(first.accountKey, "cp:ghost");
+      assert.equal(readCache(box.cacheFile)["anthropic:cp:ghost:5h"].result.ok, true);
+
+      now = 10_000;
+      unlinkSync(credentialsPath);
+      __internals.__resetMultiAccountSticky();
+      const afterRemoval = await readWeekly(options);
+
+      assert.equal(afterRemoval.ok, false);
+      assert.equal(afterRemoval.errorKind, "unknown");
+      assert.equal(afterRemoval.stale, undefined);
+      assert.deepEqual(authorizations, ["Bearer tok-ghost"]);
+    });
+  } finally {
+    Date.now = savedNow;
+  }
+});
 
 test("gate resolves two Claude profiles and fetches each profile's own token", async () => {
   const box = sandbox();

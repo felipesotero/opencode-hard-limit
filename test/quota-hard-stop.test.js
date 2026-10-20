@@ -7,7 +7,7 @@ import { join } from "node:path";
 import QuotaHardStopPlugin from "../quota-hard-stop.js";
 import { resolveConfig } from "../lib/config.js";
 import { writePostpone, clearPostpone } from "../lib/postpone.js";
-import { __internals as quotaInternals } from "../lib/quota.js";
+import { __internals as quotaInternals, resolveQuotaAccount } from "../lib/quota.js";
 
 const { __test__ } = QuotaHardStopPlugin;
 __test__.setCliInstaller(() => {});
@@ -427,6 +427,307 @@ test("block message omits the postpone hint when allowPostpone is disabled (defa
   }
 });
 
+
+test("[D2] stale quota results are throttled in memory while retaining their original timestamp", async () => {
+  const { root, xdg, proj } = sandbox();
+  const profileDir = join(root, "profiles", "pro");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, ".credentials.json"), JSON.stringify({
+    claudeAiOauth: { accessToken: "tok-pro", expiresAt: 3_601_000 },
+  }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({
+    anthropicProfileDirs: [profileDir],
+    window: "5h",
+    minRemaining: 30,
+    staleBlockMarginPct: 10,
+    cacheTtlMs: 60_000,
+    minRefreshIntervalMs: 1_000,
+    blockOnError: true,
+  }));
+
+  const savedNow = Date.now;
+  const savedFetch = global.fetch;
+  let now = 1_000;
+  let fetchCalls = 0;
+  Date.now = () => now;
+  quotaInternals.__resetMultiAccountSticky();
+  __test__.clearState();
+  try {
+    await withEnv({
+      HOME: join(root, "home"),
+      XDG_CONFIG_HOME: xdg,
+      XDG_DATA_HOME: join(root, "xdg-data"),
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(root, "missing-anthropic-accounts.json"),
+    }, async () => {
+      global.fetch = async (_url, options) => {
+        assert.equal(options.headers.Authorization, "Bearer tok-pro");
+        fetchCalls += 1;
+        if (fetchCalls === 1) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { get: () => null },
+            text: async () => JSON.stringify({ five_hour: { utilization: 65 } }),
+          };
+        }
+        return { ok: false, status: 500, headers: { get: () => null }, text: async () => "upstream failure" };
+      };
+
+      const cfg = resolveConfig({ projectDir: proj }).values;
+      const baseline = await __test__.refreshQuota("anthropic", cfg, {
+        window: "5h",
+        force: true,
+        providerId: "claude-pro",
+      });
+      assert.equal(baseline.ok, true);
+      assert.equal(baseline.remaining, 35);
+      const plugin = await QuotaHardStopPlugin({ directory: proj });
+      const key = "anthropic:cp:pro:5h";
+
+      now = 62_001;
+      await assert.rejects(
+        plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } }),
+        /stale fail-safe/,
+      );
+      const failedRefresh = __test__.inflight.get(key);
+      if (failedRefresh) await failedRefresh;
+      assert.equal(fetchCalls - 1, 1);
+
+      const staleEntry = __test__.getCacheEntry("anthropic", "cp:pro", "5h");
+      assert.equal(staleEntry.at, 62_001);
+      assert.equal(staleEntry.ttl, Math.min(cfg.cacheTtlMs, 10_000));
+      assert.equal(staleEntry.result.stale, true);
+      assert.equal(staleEntry.result.receivedAt, 1_000);
+
+      now = 62_002;
+      await assert.rejects(
+        plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } }),
+        /stale fail-safe/,
+      );
+      assert.equal(fetchCalls - 1, 1, "a stale LKG is reused during the 10-second throttle");
+      assert.equal(staleEntry.result.receivedAt, 1_000, "evaluate still receives the old LKG timestamp");
+
+      now = 72_002;
+      await assert.rejects(
+        plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } }),
+        /stale fail-safe/,
+      );
+      const retriedRefresh = __test__.inflight.get(key);
+      if (retriedRefresh) await retriedRefresh;
+      assert.equal(fetchCalls - 1, 2, "a new fetch is allowed after the throttle expires");
+    });
+  } finally {
+    Date.now = savedNow;
+    global.fetch = savedFetch;
+    quotaInternals.__resetMultiAccountSticky();
+    __test__.clearState();
+  }
+});
+
+test("[D2] an expired cp profile fails open and logs once per slug per ten minutes", async () => {
+  const { root, xdg, proj } = sandbox();
+  const profileDir = join(root, "profiles", "pro");
+  const credentialsPath = join(profileDir, ".credentials.json");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(credentialsPath, JSON.stringify({
+    claudeAiOauth: { accessToken: "tok-expired", expiresAt: 99_999 },
+  }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({
+    anthropicProfileDirs: [profileDir],
+    minRemaining: 90,
+    blockOnError: true,
+    blockOnAuthError: true,
+  }));
+
+  const savedNow = Date.now;
+  const savedFetch = global.fetch;
+  let now = 100_000;
+  let readerCalls = 0;
+  let fetchCalls = 0;
+  const logs = [];
+  Date.now = () => now;
+  quotaInternals.__resetMultiAccountSticky();
+  __test__.clearState();
+  try {
+    await withEnv({
+      HOME: join(root, "home"),
+      XDG_CONFIG_HOME: xdg,
+      XDG_DATA_HOME: join(root, "xdg-data"),
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(root, "missing-anthropic-accounts.json"),
+    }, async () => {
+      global.fetch = async () => {
+        fetchCalls += 1;
+        throw new Error("expired profile must not fetch quota");
+      };
+      __test__.setQuotaReader(async () => {
+        readerCalls += 1;
+        return { ok: false, error: "unexpected quota read", errorKind: "auth" };
+      });
+
+      const account = await resolveQuotaAccount({
+        provider: "anthropic",
+        providerId: "claude-pro",
+        anthropicProfileDirs: [profileDir],
+      });
+      assert.equal(account.accountKey, "cp:pro");
+      assert.equal(account.error, undefined);
+      assert.equal(account.credential.expiresAt, 99_999);
+
+      const plugin = await QuotaHardStopPlugin({
+        directory: proj,
+        client: { app: { log: (entry) => logs.push(entry) } },
+      });
+      await plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } });
+      await plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } });
+
+      assert.equal(readerCalls, 0);
+      assert.equal(fetchCalls, 0);
+      assert.equal(__test__.cache.size, 0);
+      assert.equal(__test__.seenKeys.size, 0);
+      assert.equal(logs.length, 1);
+      assert.equal(logs[0].body.service, "opencode-hard-limit");
+      assert.equal(logs[0].body.level, "warn");
+      assert.match(logs[0].body.message, new RegExp(account.label));
+      assert.match(logs[0].body.message, /expired/i);
+      assert.match(logs[0].body.message, /renew/i);
+      assert.doesNotMatch(logs[0].body.message, /tok-expired/);
+
+      now += 10 * 60 * 1000;
+      await plugin["chat.params"]({ provider: { info: { id: "claude-pro" } } });
+      assert.equal(logs.length, 2, "the same profile can warn again after ten minutes");
+
+      writeFileSync(credentialsPath, JSON.stringify({
+        claudeAiOauth: { accessToken: "tok-expired", expiresAt: "700000" },
+      }));
+      quotaInternals.__resetMultiAccountSticky();
+      const nonNumericExpiry = await resolveQuotaAccount({
+        provider: "anthropic",
+        providerId: "claude-pro",
+        anthropicProfileDirs: [profileDir],
+      });
+      assert.equal(nonNumericExpiry.credential.expiresAt, undefined);
+    });
+  } finally {
+    Date.now = savedNow;
+    global.fetch = savedFetch;
+    quotaInternals.__resetMultiAccountSticky();
+    __test__.resetQuotaReader();
+    __test__.clearState();
+  }
+});
+
+test("[D2] a valid cp profile still reads quota through the real reader", async () => {
+  const { root, xdg, proj } = sandbox();
+  const profileDir = join(root, "profiles", "valid");
+  mkdirSync(profileDir, { recursive: true });
+  writeFileSync(join(profileDir, ".credentials.json"), JSON.stringify({
+    claudeAiOauth: { accessToken: "tok-valid", expiresAt: Date.now() + 3_600_000 },
+  }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({
+    anthropicProfileDirs: [profileDir],
+    minRemaining: 30,
+  }));
+
+  const savedFetch = global.fetch;
+  let fetchCalls = 0;
+  const logs = [];
+  quotaInternals.__resetMultiAccountSticky();
+  __test__.clearState();
+  try {
+    await withEnv({
+      HOME: join(root, "home"),
+      XDG_CONFIG_HOME: xdg,
+      XDG_DATA_HOME: join(root, "xdg-data"),
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(root, "missing-anthropic-accounts.json"),
+    }, async () => {
+      global.fetch = async (_url, options) => {
+        fetchCalls += 1;
+        assert.equal(options.headers.Authorization, "Bearer tok-valid");
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ five_hour: { utilization: 20 } }),
+        };
+      };
+
+      const plugin = await QuotaHardStopPlugin({
+        directory: proj,
+        client: { app: { log: (entry) => logs.push(entry) } },
+      });
+      await plugin["chat.params"]({ provider: { info: { id: "claude-valid" } } });
+
+      assert.equal(fetchCalls, 1);
+      assert.ok(__test__.cache.has("anthropic:cp:valid:5h"));
+      assert.equal(logs.length, 0);
+    });
+  } finally {
+    global.fetch = savedFetch;
+    quotaInternals.__resetMultiAccountSticky();
+    __test__.clearState();
+  }
+});
+
+test("[D2] a non-cp account with an expired credential follows the normal quota flow", async () => {
+  const { root, xdg, proj } = sandbox();
+  const accountsFile = join(root, "anthropic-accounts.json");
+  writeFileSync(accountsFile, JSON.stringify({
+    activeAccountUuid: "A",
+    accounts: [{
+      uuid: "A",
+      refreshToken: "refresh-A",
+      accessToken: "access-A",
+      expiresAt: 0,
+    }],
+  }));
+  writeFileSync(join(proj, ".opencode-hard-limit.json"), JSON.stringify({
+    minRemaining: 30,
+    blockOnError: true,
+    blockOnAuthError: true,
+  }));
+
+  const savedFetch = global.fetch;
+  let fetchCalls = 0;
+  const logs = [];
+  quotaInternals.__resetMultiAccountSticky();
+  __test__.clearState();
+  try {
+    await withEnv({
+      HOME: join(root, "home"),
+      XDG_CONFIG_HOME: xdg,
+      XDG_DATA_HOME: join(root, "xdg-data"),
+      OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: accountsFile,
+    }, async () => {
+      global.fetch = async (_url, options) => {
+        fetchCalls += 1;
+        assert.equal(options.headers.Authorization, "Bearer access-A");
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ five_hour: { utilization: 20 } }),
+        };
+      };
+      const account = await resolveQuotaAccount({ provider: "anthropic", providerId: "anthropic" });
+      assert.equal(account.accountKey, "ma:A");
+      assert.equal(account.error, undefined);
+      assert.equal(account.credential.expiresAt, 0);
+      const plugin = await QuotaHardStopPlugin({
+        directory: proj,
+        client: { app: { log: (entry) => logs.push(entry) } },
+      });
+
+      await plugin["chat.params"]({ provider: { info: { id: "anthropic" } } });
+      assert.ok(__test__.seenKeys.has("anthropic:ma:A:5h"));
+      assert.equal(fetchCalls, 1);
+      assert.equal(logs.length, 0);
+    });
+  } finally {
+    global.fetch = savedFetch;
+    quotaInternals.__resetMultiAccountSticky();
+    __test__.clearState();
+  }
+});
 
 test("chat.params refreshes after active Anthropic account rotation without a manual refresh", async () => {
   const { root, xdg, proj } = sandbox();
