@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { SIDEBAR_LIB_FILES } from "../lib/deploy.js";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
 
@@ -23,6 +25,15 @@ function collectImports(entry, seen = new Set()) {
   }
   return seen;
 }
+
+test("every sidebar lib import is deployed and shipped", () => {
+  const libImports = [...collectImports("quota-sidebar.tsx")].filter((file) => file.startsWith("lib/"));
+  const deployed = new Set(SIDEBAR_LIB_FILES.map((file) => `lib/${file}`));
+  const shipped = new Set(pkg.files);
+
+  assert.deepEqual(libImports.filter((file) => !deployed.has(file)), [], "sidebar lib imports must be in SIDEBAR_LIB_FILES");
+  assert.deepEqual(libImports.filter((file) => !shipped.has(file)), [], "sidebar lib imports must be in package.json files");
+});
 
 // A file that is imported at runtime but missing from package.json "files"
 // works from a checkout (and from a path-loaded plugin) yet throws

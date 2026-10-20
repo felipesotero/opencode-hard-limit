@@ -13,6 +13,7 @@ import { parseArgs } from "node:util";
 
 import {
   DEFAULTS,
+  CONFIG_KEYS,
   resolveConfig,
   writeScope,
   globalConfigPath,
@@ -184,7 +185,7 @@ function installPlugin() {
   }
 
   // 2. Remove any legacy server files previously copied into plugins/
-  //    (quota-hard-stop.js, lib/config.js, lib/quota.js, lib/evaluate.js).
+  //    (quota-hard-stop.js, lib/config.js, lib/quota.js).
   //    Skip when ocParseOk is false to avoid destroying a working legacy install
   //    while registration has failed.
   if (ocParseOk) cleanupLegacyCopies();
@@ -297,7 +298,7 @@ function uninstallPlugin() {
 function showResolved() {
   const { values, sources, paths } = resolveConfig({ projectDir: process.cwd() });
   print("Effective configuration (highest-precedence source wins):");
-  const allKeys = [...Object.keys(DEFAULTS), ...Object.values(PROVIDER_WINDOW_KEYS), "anthropicAccountsFile"];
+  const allKeys = CONFIG_KEYS;
   for (const key of allKeys) {
     if (Object.values(PROVIDER_WINDOW_KEYS).includes(key) && values[key] === undefined) {
       print(`  ${key.padEnd(17)} = ${values.window} (inherits window)`);
@@ -329,9 +330,8 @@ function showResolved() {
 }
 
 // Lists every discovered account per monitored provider with its current
-// quota — one row per Claude profile dir (see lib/accounts.js) and one row
-// per oc-codex-multi-auth-style OpenAI account, or a single "default" row
-// per provider when no multi-account store is found for it.
+// quota, one row per Claude profile or OpenAI store account, and one generic
+// account row when the provider has no multi-account store.
 async function accountsCommand(values) {
   const cfg = resolveConfig({ projectDir: process.cwd() }).values;
   const asJson = Boolean(values.json);
@@ -352,12 +352,21 @@ async function accountsCommand(values) {
         cacheTtlMs: cfg.cacheTtlMs,
         rateLimitBackoffMs: cfg.rateLimitBackoffMs,
         minRefreshIntervalMs: cfg.minRefreshIntervalMs,
+        accountsFile: cfg.anthropicAccountsFile,
+        credentialSource: cfg.anthropicCredentialSource,
         anthropicProfileDirs: cfg.anthropicProfileDirs,
         openaiAccountsFile: cfg.openaiAccountsFile,
       });
     } catch (err) {
       results = [
-        { ok: false, error: err?.message || String(err), accountId: "default", accountLabel: provider.label, isActive: true },
+        {
+          ok: false,
+          error: err?.message || String(err),
+          accountKey: provider.id === "anthropic" ? "cli" : "oc:default",
+          accountId: provider.id === "anthropic" ? "cli" : "oc:default",
+          accountLabel: provider.label,
+          isActive: true,
+        },
       ];
     }
     for (const r of results) {

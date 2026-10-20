@@ -16,7 +16,6 @@ const POLL_INTERVAL_MS = (() => {
   const parsed = raw == null || raw.trim() === "" ? NaN : Number(raw);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_POLL_INTERVAL_MS;
 })();
-const READ_TIMEOUT_MS = 10_000;
 const BAR_WIDTH = 14;
 const SAFE_HEADROOM_BAND = 30;
 const STALE_ANNOTATION_MIN_AGE_MS = 5 * 60 * 1000; // only show the stale hint once the snapshot is older than 5 minutes
@@ -35,27 +34,25 @@ type WeeklyQuotaResult = {
   receivedAt?: number;
 };
 
-// One entry per discovered account (or a single synthetic "default" entry
-// when no multi-account store is found for that provider) — see
-// lib/quota.js's readAccountsWeekly() and lib/accounts.js.
+// One entry per resolved account, produced by lib/quota.js's readAccountsWeekly().
 type AccountQuotaResult = WeeklyQuotaResult & {
-  accountId: string;
+  accountKey: string;
   accountLabel: string;
   isActive: boolean;
 };
 
 type QuotaSnapshot = WeeklyQuotaResult & {
+  accountKey: string;
   receivedAt: number;
   accountLabel: string;
   isActive: boolean;
 };
 
-// Keyed by `${providerId}:${accountId}` so pro/max/multiple-OpenAI-accounts
-// each hold their own independent signal slot.
+// Keyed by `${providerId}:${accountKey}` so each account has its own slot.
 type QuotaMap = Record<string, QuotaSnapshot | undefined>;
 
-function rowKey(providerId: string, accountId: string): string {
-  return `${providerId}:${accountId}`;
+function rowKey(providerId: string, accountKey: string): string {
+  return `${providerId}:${accountKey}`;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -177,7 +174,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
             results = (await readAccountsWeekly({
               provider: provider.id,
               window: windows[provider.id],
-              timeoutMs: READ_TIMEOUT_MS,
+              timeoutMs: cfg.timeoutMs,
               cacheTtlMs: cfg.cacheTtlMs,
               minRefreshIntervalMs: cfg.minRefreshIntervalMs,
               rateLimitBackoffMs: cfg.rateLimitBackoffMs,
@@ -196,7 +193,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                 resetAt: null,
                 unlimited: false,
                 error: error instanceof Error ? error.message : "quota unavailable",
-                accountId: "default",
+                accountKey: provider.id === "anthropic" ? "cli" : "oc:default",
                 accountLabel: provider.label,
                 isActive: true,
               },
@@ -206,20 +203,22 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
           if (props.api.lifecycle.signal.aborted) return;
 
           setSnapshot((current) => {
-            const next = { ...current };
+            const providerPrefix = `${provider.id}:`;
+            const next: QuotaMap = {};
+            for (const [key, value] of Object.entries(current)) {
+              if (!key.startsWith(providerPrefix) && value) next[key] = value;
+            }
+
             for (const result of results) {
-              const key = rowKey(provider.id, result.accountId);
+              const key = rowKey(provider.id, result.accountKey);
               const normalized =
                 result.status === "ok" ? normalizeResult(result) : errorSnapshot(result, result.error ?? "quota unavailable");
-
-              const previous = next[key];
+              const previous = current[key];
               if (normalized.status === "error" && previous?.status === "ok") {
                 next[key] = { ...previous, stale: true };
                 continue;
               }
 
-              // quotaWindow is fixed per mount so a mismatch is currently unreachable;
-              // guard is defensive against TUI reload/config-change semantics we don't control.
               const carriedResetAt =
                 normalized.status === "ok" &&
                 (normalized.resetAt === null || normalized.resetAt === undefined) &&
@@ -227,7 +226,6 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
                 previous.window === normalized.window
                   ? previous.resetAt
                   : normalized.resetAt;
-
               next[key] = { ...normalized, resetAt: carriedResetAt };
             }
             return next;
@@ -256,9 +254,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
     if (interval) clearInterval(interval);
   });
 
-  // Flatten the snapshot map into a stable, provider-ordered list of rows —
-  // one row per discovered account. Ordering: MONITORED_PROVIDERS order
-  // first (Claude before OpenAI), then account id within a provider.
+  // Flatten snapshots into provider-ordered rows, sorted by resolved account key.
   const rows = () => {
     const map = snapshot();
     const providerOrder = MONITORED_PROVIDERS.map((p) => p.id);
@@ -275,9 +271,7 @@ function SidebarContentView(props: { api: TuiPluginApi; sessionID: string }) {
       .map((key) => ({ key, providerId: key.slice(0, key.indexOf(":")), state: map[key]! }));
   };
 
-  // Only tag a row "(active)" when its provider actually has more than one
-  // account — the trivial single/"default" account case stays unlabeled, as
-  // before this feature existed.
+  // Only tag a row "(active)" when its provider has multiple account rows.
   const providerRowCounts = () => {
     const counts: Record<string, number> = {};
     for (const { providerId } of rows()) counts[providerId] = (counts[providerId] ?? 0) + 1;
