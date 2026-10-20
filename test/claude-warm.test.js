@@ -337,7 +337,12 @@ test("warmClaudeAccounts: timeout kills the process group and waits for close", 
     return results;
   });
 
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 55));
+  // Wait for the escalation itself instead of a fixed sleep: spawn setup time
+  // varies under load, so a wall-clock guess made this test flaky.
+  const deadline = Date.now() + 5_000;
+  while (!signals.some(([, sig]) => sig === "SIGKILL") && Date.now() < deadline) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
   assert.deepEqual(signals, [[-75_001, "SIGTERM"], [-75_001, "SIGKILL"]]);
   assert.equal(settled, false, "exit alone must not settle the warm call");
   child.emit("close", null, "SIGKILL");
