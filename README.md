@@ -66,6 +66,21 @@ flags. It asks **where** the threshold should apply (global or project) and
 prints the next step. `init` without `--install` only writes config; run
 `npx opencode-hard-limit install` afterward to activate the plugin.
 
+`init` and `install` also ask, **once**, whether to star the repo on GitHub:
+
+```text
+★ Star the repo on GitHub? (Y/n)
+```
+
+It only ever asks on an interactive terminal, and only starts a star after an
+explicit yes — by calling your own already-authenticated [`gh`](https://cli.github.com/)
+(`gh api --method PUT /user/starred/...`). The plugin never handles a GitHub
+token of its own. Answering either way is remembered in
+`~/.config/opencode/opencode-hard-limit/star-prompted`, so you are not asked
+again. To never see it: pass `--no-star`, or set `OPENCODE_QUOTA_NO_STAR=1`
+(`CI` is honored too). Without `gh` installed or authenticated it just prints
+the URL.
+
 ## Updating
 
 Updates arrive automatically. Once you have run `install`, OpenCode checks for a
