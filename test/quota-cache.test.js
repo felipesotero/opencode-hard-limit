@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readWeekly } from "../lib/quota.js";
+import { __internals, readWeekly } from "../lib/quota.js";
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "qhl-cache-"));
@@ -272,10 +272,18 @@ async function withStubbedUsage({ respond, mode = "noWindows", at = 1_000 }, fn)
 
   const savedNow = Date.now;
   const savedFetch = global.fetch;
+  __internals.__resetMultiAccountSticky();
   Date.now = () => at;
   try {
     await withEnv(
-      { HOME: home, XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_CLAUDE_BIN: bin, QHL_CLAUDE_MODE: mode },
+      {
+        HOME: home,
+        XDG_CONFIG_HOME: xdg,
+        XDG_DATA_HOME: xdg,
+        OPENCODE_QUOTA_ANTHROPIC_ACCOUNTS_FILE: join(xdg, "missing-anthropic-accounts.json"),
+        OPENCODE_QUOTA_CLAUDE_BIN: bin,
+        QHL_CLAUDE_MODE: mode,
+      },
       async () => {
         global.fetch = respond;
         await fn({ cacheFile, setNow: (t) => { Date.now = () => t; } });
@@ -284,6 +292,7 @@ async function withStubbedUsage({ respond, mode = "noWindows", at = 1_000 }, fn)
   } finally {
     Date.now = savedNow;
     global.fetch = savedFetch;
+    __internals.__resetMultiAccountSticky();
   }
 }
 
@@ -313,7 +322,7 @@ test("a Retry-After longer than the cap is clamped to maxRateLimitBackoffMs", as
     });
     assert.equal(result.errorKind, "ratelimit");
     assert.equal(result.backoffUntil, 61_000); // now(1_000) + cap, not + 3_600_000
-    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"].nextAllowedAt, 61_000);
+    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"].nextAllowedAt, 61_000);
   });
 });
 
@@ -368,7 +377,7 @@ test("429 without LKG is capped by noBaselineRateLimitBackoffMs, tighter than ma
     });
     assert.equal(result.errorKind, "ratelimit");
     assert.equal(result.backoffUntil, 46_000); // now(1_000) + no-baseline cap, not + maxRateLimitBackoffMs
-    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"].nextAllowedAt, 46_000);
+    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"].nextAllowedAt, 46_000);
   });
 });
 
@@ -434,7 +443,7 @@ test("a transient non-429 failure serves the last-known-good as stale", async ()
     assert.equal(second.receivedAt, 1_000, "keeps the original timestamp, so staleness stays honest");
     // No backoff: a 503 is not a rate limit, so the next call may refetch.
     assert.equal(second.backoffUntil, undefined);
-    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"].result.remaining, 75);
+    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"].result.remaining, 75);
   });
 });
 
@@ -474,7 +483,7 @@ test("an auth failure surfaces instead of hiding behind the last-known-good", as
     // quota the plugin keeps trusting forever.
     assert.equal(second.ok, false);
     assert.equal(second.errorKind, "auth");
-    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:Weekly"].result.ok, false);
+    assert.equal(JSON.parse(readFileSync(cacheFile, "utf8"))["anthropic:cli:Weekly"].result.ok, false);
   });
 });
 
