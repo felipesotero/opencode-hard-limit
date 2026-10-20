@@ -7,9 +7,8 @@ OpenAI usage and puts a **hard stop** on model calls once you drop below a
 percent-remaining threshold you choose. It also adds a live **sidebar bar** so
 you can see exactly how much you have left and when the window resets.
 
-It reads your subscription quota **natively** — no external quota plugin
-required — and adds the enforcement layer on top: a hard stop plus a live
-sidebar bar.
+It reads your subscription quota **natively** without an external quota
+plugin, then adds the enforcement layer: a hard stop plus a live sidebar bar.
 
 ## Why you might want this
 
@@ -39,27 +38,28 @@ Then **restart OpenCode**. That is it.
 
 `install` does two things:
 
-1. **Registers the server plugin** — writes `"opencode-hard-limit"` into
+1. **Registers the server plugin:** writes `"opencode-hard-limit"` into
    `~/.config/opencode/opencode.json`. OpenCode reads this on every startup and
    automatically fetches the latest published version via its native package
    manager, so the hard-stop logic is always up to date without any manual
    steps.
 
-2. **Deploys the sidebar widget** — copies `quota-sidebar.tsx` into
+2. **Deploys the sidebar widget:** copies `quota-sidebar.tsx` into
    `~/.config/opencode/plugins/` and registers it in `tui.json`. The plugin
    factory also self-heals the sidebar on every opencode startup: it checks
    whether the deployed file matches the currently installed npm version and
    re-copies it if not, so sidebar and server plugin stay in sync automatically.
 
-3. **Registers the CLI** — when the server plugin starts, it installs the
+3. **Registers the CLI:** when the server plugin starts, it installs the
    matching published package globally in the background. This makes
    `opencode-hard-limit` available in OpenCode shell mode for commands such as
    `opencode-hard-limit postpone 30`.
 
 There is **no external quota dependency**. The plugin reads quota itself:
-for Claude/Anthropic it uses your local `claude` CLI (or the OAuth usage API as
-a fallback), and for OpenAI it uses the OAuth session in OpenCode's
-`auth.json`. Nothing to install separately.
+for Claude/Anthropic it uses the selected local account's OAuth credentials
+when available and can use the local `claude` CLI for legacy single-account
+access. For OpenAI it uses the OAuth session in OpenCode's `auth.json` or a
+supported multi-account store. Nothing to install separately.
 
 Prefer to be walked through it? Run `npx opencode-hard-limit init` with no
 flags. It asks **where** the threshold should apply (global or project) and
@@ -73,7 +73,7 @@ prints the next step. `init` without `--install` only writes config; run
 ```
 
 It only ever asks on an interactive terminal, and only starts a star after an
-explicit yes — by calling your own already-authenticated [`gh`](https://cli.github.com/)
+explicit yes by calling your own already-authenticated [`gh`](https://cli.github.com/)
 (`gh api --method PUT /user/starred/...`). The plugin never handles a GitHub
 token of its own. Answering either way is remembered in
 `~/.config/opencode/opencode-hard-limit/star-prompted`, so you are not asked
@@ -86,7 +86,7 @@ the URL.
 Updates arrive automatically. Once you have run `install`, OpenCode checks for a
 newer published version of `opencode-hard-limit` on every startup and updates
 the server plugin in the background. The sidebar self-heals to match on the
-same or next restart — no manual steps needed.
+same or next restart, with no manual steps needed.
 
 If you are upgrading from a version prior to `0.9.0` (which used file copies
 instead of the native plugin registry), run the installer once to migrate:
@@ -113,36 +113,35 @@ dependencies are left in place (other plugins may use them).
 
 Before every model request, on OpenCode's `chat.params` hook:
 
-1. Detect the provider. Only `anthropic` (Claude) and `openai` (OpenAI) are
-   monitored; anything else passes straight through.
-2. Use the last cached quota immediately; `chat.params` no longer fetches on the
-   hot path.
-3. If there is no cache yet, do one protected fetch so the first request is
-   still guarded.
-4. Refresh quota mostly when the agent goes idle (`session.status=idle` /
-   `session.idle`), spaced by `minRefreshIntervalMs` (default 120s).
-5. If a refresh gets a 429 / rate-limit response, back off for the response's
-   `Retry-After` when it sends one — capped at `maxRateLimitBackoffMs`
-   (default 600s), since Anthropic's usage endpoint can ask for the better part
-   of an hour — otherwise for `rateLimitBackoffMs` (default 300s). Either way,
-   keep serving the last known good cache.
-   If there is no last known good reading yet to serve through the backoff
-   (e.g. the very first check for an account, or a 429 right after a token
-   refresh), the cap is tightened to `noBaselineRateLimitBackoffMs` (default
-   60s) instead: there is nothing being protected, so re-checking sooner is
-   free, and it avoids showing "unavailable" for the full 600s on an account
-   that may already be answering normally again.
-   A transient non-429 failure (timeout, 5xx, bad JSON) also keeps serving the
-   last known good cache, flagged stale; an **auth** error does not, so a
-   revoked login surfaces instead of hiding behind a number that can no longer
-   be refreshed.
-6. If `percentRemaining < threshold`, throw and block the call.
-7. If quota **cannot be verified** (timeout, error, bad JSON, missing window),
-   block by default. This is a fail-safe you can flip off with
-   `--block-on-error false`.
+1. Detect the provider. IDs containing `anthropic` or `claude` map to
+   Anthropic; IDs containing `openai` or `codex` map to OpenAI. Anything else
+   passes through.
+2. Resolve one account with the shared account resolver. Each quota result has
+   its own `provider:accountKey:window` cache slot.
+3. Use fresh cached quota on the hot path. If there is no cached result yet,
+   perform one protected fetch so the first request is still guarded.
+4. Refresh quota mostly when a session goes idle (`session.status=idle` /
+   `session.idle`), with spacing controlled by `minRefreshIntervalMs`.
+5. On a 429, honor a server `Retry-After` up to `maxRateLimitBackoffMs`.
+   Without a `Retry-After`, use the configured `rateLimitBackoffMs` as-is. If
+   there is no last-known-good reading, the server delay is instead capped by
+   the smaller of `maxRateLimitBackoffMs` and `noBaselineRateLimitBackoffMs`.
+   With a last-known-good value, return that value marked stale during the
+   backoff. Without one, a rate-limit error fails open.
+6. A transient non-auth failure, such as a timeout, 5xx, or malformed response,
+   also serves the last-known-good reading as stale. An auth error is not hidden
+   behind a value that cannot be refreshed. When a stale reading is served, the
+   transient error does not invoke `blockOnError`; the ordinary threshold still
+   blocks if that reading is already below the threshold.
+7. Block when known quota is below `threshold`. A stale successful reading can
+   trigger the separate stale-failsafe when quota is blind and the remaining
+   percentage is within `staleBlockMarginPct` of the threshold. `blockOnError`
+   governs timeout and unknown errors when there is no successful value to
+   serve. `blockOnAuthError` governs auth and unreadable errors.
 
-`cacheTtlMs` still controls how long a read is considered fresh for the refresh
-path.
+`cacheTtlMs` controls how long a quota result is considered fresh for the
+refresh path. The stale-failsafe is distinct from `blockOnError` and can block
+when a stale quota value is close to the threshold.
 
 ## Which window: 5h or weekly
 
@@ -188,7 +187,7 @@ If the requested window (whether from `--window` or an explicit per-provider
 override) simply doesn't exist on your account, the plugin automatically
 falls back to whichever window the account *does* expose instead of erroring
 out, silently. The sidebar shows the effective window that's actually being
-used (e.g. `OpenAI Weekly 92% left, limit 25%`) — that's the only signal
+used (e.g. `OpenAI Weekly 92% left, limit 25%`), which is the only signal
 you'll get; there is no toast. To pin the provider to the window your account
 actually exposes:
 
@@ -227,74 +226,127 @@ runtime deps exist in `~/.config/opencode/`.
 
 ## Multi-account
 
-If you run more than one Claude and/or OpenAI account side by side,
-`opencode-hard-limit` shows quota for **every** account it can find — no
-extra setup, and no dependency on the plugins that manage those accounts.
-It just reads their on-disk storage format if present:
+The plugin can read multiple Claude and OpenAI accounts from their local account
+stores. It does not require the companion account-management plugins.
 
-- **Claude/Anthropic** — if you run multiple isolated Claude Code logins as
-  separate provider instances (the pattern used by
-  [`@openchamber/opencode-claude`](https://github.com/openchamber/opencode-claude)
-  when each instance is pinned to its own `CLAUDE_CONFIG_DIR`, e.g. provider
-  ids `claude-pro` / `claude-max` backed by `~/.claude-profiles/pro` /
-  `~/.claude-profiles/max`), each profile directory's `.credentials.json` is
-  discovered automatically. The hard-stop gate also resolves the **correct**
-  account per call: a request through the `claude-pro` provider checks the
-  `pro` profile's quota, `claude-max` checks `max` — they no longer share one
-  cache entry / one credential. The bare `~/.claude` is used only when no named
-  profile is found: alongside profiles it is a leftover login nothing routes to,
-  and polling it would spend the usage endpoint's rate limit on a quota no model
-  call consumes. Two dirs holding the same login (a copied profile) collapse to
-  one account for the same reason.
-- **OpenAI/Codex** — if a multi-account manager such as
-  [`oc-codex-multi-auth`](https://github.com/ndycode/oc-codex-multi-auth) is
-  installed, its account store (default
-  `~/.opencode/oc-codex-multi-auth-accounts.json`) is read directly and every
-  account in it is shown, with the one it marks active labeled accordingly.
+- **Claude profiles:** each named profile lives at
+  `~/.claude-profiles/<slug>/.credentials.json`. Configure other locations with
+  `anthropicProfileDirs`, using the `--anthropic-profile-dirs` CLI option, the
+  `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` environment variable, or an array in
+  the config file. Provider IDs such as `claude-pro` and `claude-max` map to
+  profiles `pro` and `max`. Profile directories with the same OAuth refresh
+  token are deduplicated, so a copied profile does not create a second account.
+- **OpenAI accounts:** the plugin reads the account store at
+  `~/.opencode/oc-codex-multi-auth-accounts.json` by default. Set
+  `openaiAccountsFile` with `--openai-accounts-file`, the
+  `OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE` environment variable, or the config
+  file to use another path.
 
-Neither integration is a hard dependency — when no multi-account store is
-found for a provider, everything behaves exactly as before (one row, the
-single default login). See what was discovered with:
+List discovered accounts with `opencode-hard-limit accounts`, or use
+`opencode-hard-limit accounts --json` for structured output. The sidebar shows
+one row per account and marks the active OpenAI account.
+
+### Account resolution and cache slots
+
+A shared resolver selects credentials for both quota reads and the gate.
+Profile mode is active when a named profile is discovered or
+`anthropicProfileDirs` is explicitly configured. For Anthropic, a matching
+`cp:<slug>` profile takes priority for `claude-<slug>` providers in that mode.
+Otherwise the resolver uses the active managed account (`ma:<uuid>`),
+compatible OpenCode OAuth credentials (`oc:*`), then the legacy Claude CLI
+account (`cli`). If managed-account mode is active but has no usable
+credential, the resolver returns an auth error instead of switching to a
+different account. OpenAI store accounts use `ox:<id>`; a single OpenCode OAuth
+account uses `oc:<accountId>` or `oc:default` when the ID is missing. The
+Anthropic OpenCode OAuth key is derived from its token.
+
+Every quota slot is keyed by `provider:accountKey:window`, so each account and
+window keeps its own cached value. In profile mode, a `claude-<slug>` provider
+with no matching profile returns `errorKind: "unknown"`. The gate follows
+`blockOnError` for that error, which blocks by default. The default `~/.claude`
+login is not enumerated as a named profile. When no profile, managed account,
+or OpenCode OAuth credential applies, the legacy Claude CLI source uses one
+`cli` account key.
+
+Cache writes are serialized within one process. Separate OpenCode processes do
+not share a write lock, so concurrent writes to the quota cache are
+last-writer-wins and can cause one extra quota fetch.
+
+### Expired Claude profile tokens in the gate
+
+In profile mode, when a resolved `cp:<slug>` profile has a readable access
+token whose `expiresAt` has passed, the gate logs a warning and allows the
+current model call through. That call can refresh the profile's OAuth token,
+avoiding a blocked request that would otherwise be responsible for renewing
+its own credentials. The warning is rate-limited to once per profile every ten
+minutes.
+
+## Refreshing idle Claude profiles: `warm`
+
+Reading quota does not refresh a Claude OAuth token. A named profile that sits
+unused can expire and return 401 from the usage endpoint until an authenticated
+Claude CLI call refreshes its credentials.
+
+`warm` runs one scheduling tick over named profiles only. It warms a profile
+when its `claudeAiOauth.expiresAt` is at or before the current time and the
+profile has a refresh token. Profiles with a valid token are skipped. Use
+`--force` to call every refresh-capable profile, even when its token has not
+expired. After the local CLI passes its checks, no named profiles produces a
+notice and a successful exit. `warm` does not use the default `~/.claude` login
+or managed `ma:` / `oc:` accounts.
+
+`warm --watch` keeps checking local credential files. Its default interval is
+600,000 ms (10 minutes), and valid `--idle-interval` values range from 60,000
+ms (1 minute) through 86,400,000 ms (24 hours). The scheduler can set the next
+check for 30 seconds after a token expires when that is sooner than the idle
+interval. For an idle profile that refreshes successfully, this means about one
+call per token expiration rather than one call per check. Failed refreshes use
+per-profile backoff, starting at 5 minutes and doubling up to 6 hours. A lock
+allows only one warm process at a time. Ctrl+C aborts the call and stops the
+watch loop.
+
+A warm call uses the profile's own OAuth credentials and makes one minimal
+Claude CLI request. It disables built-in tools with `--tools ""`, disables MCP
+with `--strict-mcp-config`, and prevents session persistence with
+`--no-session-persistence`. The call runs with a cleaned auth environment and
+a private working directory. `--safe-mode` and a `$0.05` budget ceiling are
+added when the installed CLI advertises those options. Success requires a
+changed access token or an advanced `expiresAt` in the credential file. A
+successful call on an otherwise idle profile can open a new rolling 5-hour
+window from the warm time.
+
+The CLI-reported cost is about US$0.015 per call. For Pro/Max subscriptions,
+that is an API-equivalent estimate rather than a direct cash charge, but the
+call consumes the plan's rate-limit capacity. A different model from `haiku`
+may cost more.
 
 ```sh
-opencode-hard-limit accounts        # human-readable
-opencode-hard-limit accounts --json # machine-readable
+opencode-hard-limit warm
+opencode-hard-limit warm --json
+opencode-hard-limit warm --force
+opencode-hard-limit warm --watch --idle-interval 600000
 ```
 
-The sidebar renders one row per discovered account the same way; the active
-account of a multi-account provider is tagged `(active)`.
+| Flag | Behavior |
+| --- | --- |
+| `--model <m>` | Defaults to `haiku`. The name must start with a letter or digit and may contain letters, digits, `_`, `.`, `:`, `[`, `]`, or `-`. A non-default model prints a cost warning. |
+| `--warm-timeout <ms>` | Per-call timeout from 5,000 through 300,000 ms. Default: 30,000 ms. |
+| `--idle-interval <ms>` | `--watch` check interval from 60,000 through 86,400,000 ms. Default: 600,000 ms. |
+| `--force` | Warm refresh-capable profiles even when their token is valid. Avoid combining it with `--watch`, since that can make a call at every check. |
+| `--json` | Print an array of results without credential tokens. |
 
-Override the discovery locations if yours differ from the defaults:
+Use `warm` for named profiles that are used infrequently but should remain
+readable in `accounts`, the sidebar, and the gate. It is unnecessary for a
+profile used regularly, because real Claude calls refresh its token. It does
+not apply to the default single-account login, API-key-only accounts, or
+Windows. Keep `--force` for intentional one-shot runs, not cron schedules.
 
-```sh
-opencode-hard-limit set --anthropic-profile-dirs "/path/a,/path/b" --global
-opencode-hard-limit set --openai-accounts-file /path/to/accounts.json --global
-```
-
-### Keeping an idle Claude account's quota readable: `warm`
-
-Quota reads never refresh an expired OAuth access token — `accounts`/the
-sidebar just read `.credentials.json` and call the usage API directly, so a
-Claude profile nothing has used in a while will show up `unavailable` (a 401)
-until *something* makes a real call through it. The real `claude` CLI does
-refresh an expired/near-expiry token on its own, as a side effect of any
-actual invocation — so an account that's never actually used for a model call
-stays unreadable indefinitely.
-
-`warm` forces that real call for you, once per discovered Claude profile: a
-single, minimal, untooled turn (default model: `haiku`, the cheapest in the
-catalog) just to exercise the CLI's own OAuth client. It needs the real
-`claude` CLI on PATH (not just a quota-read dependency):
-
-```sh
-opencode-hard-limit warm          # human-readable
-opencode-hard-limit warm --json   # machine-readable, includes each call's total_cost_usd
-opencode-hard-limit warm --model sonnet --warm-timeout 45000
-```
-
-This is a small but real cost against each account's rate-limit window (not
-free) — run it occasionally (e.g. from a cron job or a shell alias), not on
-every quota poll.
+The `claude` CLI must be available on `PATH` or in `~/.local/bin`, logged in
+with OAuth, and support the required isolated-call flags. Profiles whose
+`settings.json` redirects authentication through helpers or environment values
+are skipped. On macOS, a token may be written to Keychain instead of the
+credential file. That storage path has not been tested, and this implementation
+cannot confirm a refresh unless the file's token or expiry changes.
 
 ## Configuration
 
@@ -349,8 +401,8 @@ is no guessing.
 | `--min-refresh` | `OPENCODE_QUOTA_MIN_REFRESH_MS` | `minRefreshIntervalMs` | `120000` | Minimum spacing between real quota fetches per provider/window (ms). |
 | `--rate-limit-backoff` | `OPENCODE_QUOTA_RATE_LIMIT_BACKOFF_MS` | `rateLimitBackoffMs` | `300000` | Extra cooldown after a 429 / rate-limit response that sends no `Retry-After` (ms). |
 | `--max-rate-limit-backoff` | `OPENCODE_QUOTA_MAX_RATE_LIMIT_BACKOFF_MS` | `maxRateLimitBackoffMs` | `600000` | Upper bound on a 429's server-sent `Retry-After` (ms). Does not cap `--rate-limit-backoff`. |
-| `--no-baseline-rate-limit-backoff` | `OPENCODE_QUOTA_NO_BASELINE_RATE_LIMIT_BACKOFF_MS` | `noBaselineRateLimitBackoffMs` | `60000` | Tighter cap used instead of `--max-rate-limit-backoff` when there is no last-known-good reading to serve through the backoff (ms). |
-| `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*`, falling back to `~/.claude`)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
+| `--no-baseline-rate-limit-backoff` | `OPENCODE_QUOTA_NO_BASELINE_RATE_LIMIT_BACKOFF_MS` | `noBaselineRateLimitBackoffMs` | `60000` | Tighter cap on a server-sent `Retry-After` when no last-known-good reading is available. It does not cap the local `--rate-limit-backoff` value. |
+| `--anthropic-profile-dirs` | `OPENCODE_QUOTA_ANTHROPIC_PROFILE_DIRS` | `anthropicProfileDirs` | *(auto: `~/.claude-profiles/*`; no default `~/.claude` discovery)* | Extra Claude Code profile dirs to scan for multi-account quota. Comma-separated in the env var / CLI flag; a real array in the config file. |
 | `--openai-accounts-file` | `OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE` | `openaiAccountsFile` | *(auto: `~/.opencode/oc-codex-multi-auth-accounts.json`)* | Path to a multi-account OpenAI/Codex store. |
 
 Sidebar polling:
@@ -367,12 +419,12 @@ OPENCODE_QUOTA_MIN_REMAINING=90 opencode   # temporarily stricter
 
 ## Fail-postpone mode
 
-By default this plugin has two failure modes: **fail-closed** (`blockOnError: true` /
-`blockOnAuthError: true` — block when quota can't be checked) and **fail-open**
-(`blockOnError: false` / `blockOnAuthError: false` — allow when quota can't be
-checked). There's a third, opt-in mode: **fail-postpone** — a manual, time-boxed
-bypass of an otherwise-legitimate block, for when you've decided to accept the
-risk of running over quota for a little while.
+The gate handles quota errors by class. **`blockOnError`** defaults to `true`
+for timeout and unknown errors. **`blockOnAuthError`** defaults to `false` for
+auth and unreadable errors, so those calls fail open unless you enable it.
+There is also an opt-in mode called **fail-postpone**, a manual, time-boxed
+bypass of a quota block for when you accept the risk of running over quota for
+a little while.
 
 It's disabled by default. Enable it with:
 
@@ -385,25 +437,25 @@ Once enabled, a block's error message includes a hint like:
 ```
 [quota-hard-stop] Blocked anthropic (anthropic): quota 12% remaining is below
 the 30% threshold. ... To postpone this block: in OpenCode, type ! by itself
-first to enter shell mode (pasting a whole "!opencode-hard-limit ..." line at
-once won't trigger it — type the ! yourself, then paste the rest), then run:
+first to enter shell mode. Pasting a whole "!opencode-hard-limit ..." line at
+once will not trigger it, so type the ! yourself, then paste the rest. Run:
 opencode-hard-limit postpone <minutes> (default 30, e.g. "opencode-hard-limit
-postpone 60") — no LLM cost.
+postpone 60"). This has no LLM cost.
 ```
 
-**Important — type the `!`, don't paste it:** OpenCode only enters shell mode
+**Important: type the `!`, don't paste it.** OpenCode only enters shell mode
 when `!` is the first character *typed* into an empty prompt. If you copy the
 whole `!opencode-hard-limit postpone 60` line (with the `!`) and paste it in
-one go, OpenCode will **not** switch to shell mode — the paste lands as a
+one go, OpenCode will **not** switch to shell mode. The paste lands as a
 normal chat message instead. To run the command correctly:
 
 1. Type `!` yourself (one keystroke, empty prompt) to enter shell mode.
-2. Paste (or type) just `opencode-hard-limit postpone 60` — **without** the
+2. Paste (or type) just `opencode-hard-limit postpone 60`, without the
    leading `!`.
 3. Press Enter.
 
 This postpones **any** quota block (any provider, any window) for 60 minutes.
-Cancel it early the same way — type `!`, then paste:
+Cancel it early the same way: type `!`, then paste:
 
 ```
 opencode-hard-limit postpone --clear
@@ -411,8 +463,8 @@ opencode-hard-limit postpone --clear
 
 `opencode-hard-limit get` shows whether a postpone is currently active and how
 much time is left. Postpone duration is clamped to 1–240 minutes. If
-`--allow-postpone` is later disabled, any leftover postpone timer is ignored —
-blocks resume immediately.
+`--allow-postpone` is later disabled, any leftover postpone timer is ignored.
+Blocks resume immediately.
 
 The sidebar widget also shows a red two-line hint ("To postpone the blockage
 for 30 min: type ! then paste: opencode-hard-limit postpone 30") whenever a
@@ -420,7 +472,7 @@ monitored provider is currently blocked and fail-postpone is enabled but not
 active. It disappears automatically once you postpone or once quota refreshes
 above the threshold.
 
-**Known limitation — subagents:** if a subagent (e.g. one dispatched via
+**Known limitation: subagents.** If a subagent (e.g. one dispatched via
 OpenCode's `task` tool) is the one whose call gets blocked, its parent
 orchestrator currently sees an **empty** result instead of this message.
 OpenCode's `task` tool only returns the subagent's generated text; since this
@@ -433,14 +485,16 @@ block.
 ## Requirements
 
 - OpenCode with plugin support.
-- **Claude/Anthropic quota:** a local `claude` CLI logged in with a Claude
-  Pro/Max subscription (or `~/.claude/.credentials.json`). Pure API-key/PAYG
-  usage has no subscription window and reads as `unavailable` by design.
-- **OpenAI quota:** a ChatGPT session token in OpenCode's `auth.json`.
-  An API-plan OAuth token reads as `unavailable` by design.
+- **Claude/Anthropic quota:** a Claude Pro/Max OAuth login available through a
+  supported local account source. Pure API-key/PAYG usage has no subscription
+  window and reads as `unavailable` by design. `warm` additionally requires
+  the local `claude` CLI.
+- **OpenAI quota:** a ChatGPT session token in OpenCode's `auth.json` or a
+  supported multi-account store. An API-plan OAuth token reads as `unavailable`
+  by design.
 - Network access when a live quota check runs (the usage endpoints).
-- **Multi-account (optional):** see [Multi-account](#multi-account) above —
-  nothing extra to install, just auto-detected on-disk conventions.
+- **Multi-account (optional):** see [Multi-account](#multi-account) above.
+  Nothing extra to install; the plugin detects supported local account stores.
 
 ## Verify it works
 
@@ -456,7 +510,7 @@ With, say, 81% remaining, the next Claude/OpenAI call is blocked. Set it back to
 ## Upgrade
 
 Once installed via `npx opencode-hard-limit install`, updates arrive
-automatically on every OpenCode startup — no manual steps needed. See the
+automatically on every OpenCode startup, with no manual steps needed. See the
 [Updating](#updating) section above for details and migration from older
 versions.
 
