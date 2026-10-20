@@ -1,6 +1,6 @@
 {
   "name": "opencode-hard-limit",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "OpenCode plugin that hard-stops model calls before you burn through your AI quota. Monitors the 5h or weekly window for Claude and OpenAI, blocks at a configurable percent-remaining threshold, and shows a live usage bar in the sidebar. Set your goal per-project or globally via CLI or env.",
   "type": "module",
   "main": "quota-hard-stop.js",
@@ -21,6 +21,10 @@
     "lib/deploy.js",
     "lib/quota.js",
     "lib/evaluate.js",
+    "lib/accounts.js",
+    "lib/claude-warm.js",
+    "lib/warm-schedule.js",
+    "lib/warm-watch.js",
     "lib/postpone.js",
     "lib/reset.js",
     "lib/star.js",

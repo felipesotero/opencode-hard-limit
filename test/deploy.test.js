@@ -45,8 +45,8 @@ function withEnv(env, fn) {
 }
 
 /**
- * Create a minimal fake package root with quota-sidebar.tsx and its lib deps
- * (lib/quota.js + lib/config.js), matching the real npm package layout.
+ * Create a minimal fake package root with quota-sidebar.tsx and its deployed
+ * lib dependency set, matching the real npm package layout.
  */
 function fakePkgRoot(dir, tsxContent = "// fake sidebar\nexport default function() {}") {
   mkdirSync(join(dir, "lib"), { recursive: true });
@@ -74,6 +74,16 @@ function fakePkgRoot(dir, tsxContent = "// fake sidebar\nexport default function
   writeFileSync(
     join(dir, "lib", "postpone.js"),
     "// lib/postpone.js\nexport function isPostponeActive() { return false; }",
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "lib", "accounts.js"),
+    "// lib/accounts.js\nexport async function discoverAnthropicProfiles() { return []; }\nexport async function discoverOpenAIAccounts() { return null; }",
+    "utf8",
+  );
+  writeFileSync(
+    join(dir, "lib", "evaluate.js"),
+    "// lib/evaluate.js\nexport function resolveAnthropicProfileSlug() { return null; }",
     "utf8",
   );
   return dir;
@@ -115,7 +125,7 @@ test("ensureTuiDeployed: deploys sidebar on first call", () => {
   });
 });
 
-test("ensureTuiDeployed: deploys lib/quota.js, lib/config.js, lib/reset.js, and lib/postpone.js alongside the tsx", () => {
+test("ensureTuiDeployed: deploys all sidebar lib dependencies alongside the tsx", () => {
   const { root, xdg } = sandbox();
   const pkg = fakePkgRoot(join(root, "pkg"));
   withEnv({ XDG_CONFIG_HOME: xdg }, () => {
@@ -137,6 +147,14 @@ test("ensureTuiDeployed: deploys lib/quota.js, lib/config.js, lib/reset.js, and 
       existsSync(join(plugins, "lib", "postpone.js")),
       "lib/postpone.js should be deployed into plugins/lib/ (sidebar imports it for the postpone hint)",
     );
+    assert.ok(
+      existsSync(join(plugins, "lib", "accounts.js")),
+      "lib/accounts.js should be deployed into plugins/lib/ (sidebar imports it for multi-account discovery)",
+    );
+    assert.ok(
+      existsSync(join(plugins, "lib", "evaluate.js")),
+      "lib/evaluate.js should be deployed into plugins/lib/ (quota.js imports the provider-id helper)",
+    );
     // Verify bytes match the source.
     const srcQuota = readFileSync(join(pkg, "lib", "quota.js"));
     const dstQuota = readFileSync(join(plugins, "lib", "quota.js"));
@@ -150,6 +168,9 @@ test("ensureTuiDeployed: deploys lib/quota.js, lib/config.js, lib/reset.js, and 
     const srcPostpone = readFileSync(join(pkg, "lib", "postpone.js"));
     const dstPostpone = readFileSync(join(plugins, "lib", "postpone.js"));
     assert.ok(srcPostpone.equals(dstPostpone), "deployed lib/postpone.js bytes must match source");
+    const srcEvaluate = readFileSync(join(pkg, "lib", "evaluate.js"));
+    const dstEvaluate = readFileSync(join(plugins, "lib", "evaluate.js"));
+    assert.ok(srcEvaluate.equals(dstEvaluate), "deployed lib/evaluate.js bytes must match source");
   });
 });
 
@@ -238,12 +259,12 @@ test("ensureTuiDeployed: dedupes sidebar entry in existing tui.json", () => {
 // cleanupLegacyCopies tests
 // ---------------------------------------------------------------------------
 
-test("cleanupLegacyCopies: removes truly-legacy files with header markers", () => {
+test("cleanupLegacyCopies: removes old server bundles but keeps the sidebar evaluate dependency", () => {
   const { root, xdg } = sandbox();
   const plugins = join(xdg, "opencode", "plugins");
   mkdirSync(join(plugins, "lib"), { recursive: true });
 
-  // Truly-legacy server files (no longer needed — should be deleted).
+  // Old server bundles are removed, but evaluate.js now serves the deployed sidebar too.
   writeFileSync(
     join(plugins, "quota-hard-stop.js"),
     "// quota-hard-stop.js\nconsole.log('old server plugin');",
@@ -271,7 +292,7 @@ test("cleanupLegacyCopies: removes truly-legacy files with header markers", () =
   withEnv({ XDG_CONFIG_HOME: xdg }, () => {
     cleanupLegacyCopies();
 
-    // Legacy files removed.
+    // Old server and bundled sidebar files removed.
     assert.equal(
       existsSync(join(plugins, "quota-hard-stop.js")),
       false,
@@ -279,8 +300,8 @@ test("cleanupLegacyCopies: removes truly-legacy files with header markers", () =
     );
     assert.equal(
       existsSync(join(plugins, "lib", "evaluate.js")),
-      false,
-      "lib/evaluate.js should be removed",
+      true,
+      "lib/evaluate.js must remain as a sidebar runtime dependency",
     );
     assert.equal(
       existsSync(join(plugins, "quota-sidebar.js")),

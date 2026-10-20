@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { resolveConfig, DEFAULTS, windowForProvider, writeScope } from "../lib/config.js";
+import { resolveConfig, DEFAULTS, OPTIONAL_KEYS, CONFIG_KEYS, windowForProvider, writeScope } from "../lib/config.js";
 
 function sandbox() {
   const root = mkdtempSync(join(tmpdir(), "qhl-cfg-"));
@@ -31,6 +31,21 @@ function withEnv(env, fn) {
     }
   }
 }
+
+test("optional config keys are enumerable without undefined defaults", () => {
+  assert.deepEqual(OPTIONAL_KEYS, ["anthropicAccountsFile", "anthropicProfileDirs", "openaiAccountsFile"]);
+  assert.equal(Object.values(DEFAULTS).some((value) => value === undefined), false);
+  for (const key of OPTIONAL_KEYS) assert.ok(CONFIG_KEYS.includes(key));
+});
+
+test("openaiAccountsFile is resolved as a path config key", () => {
+  const { xdg } = sandbox();
+  withEnv({ XDG_CONFIG_HOME: xdg, OPENCODE_QUOTA_OPENAI_ACCOUNTS_FILE: "  /tmp/openai-accounts.json  " }, () => {
+    const config = resolveConfig();
+    assert.equal(config.values.openaiAccountsFile, "/tmp/openai-accounts.json");
+    assert.equal(config.sources.openaiAccountsFile, "env");
+  });
+});
 
 test("defaults apply when nothing is set", () => {
   const { xdg, proj } = sandbox();

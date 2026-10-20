@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { SIDEBAR_LIB_FILES } from "../lib/deploy.js";
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"));
 
@@ -24,6 +26,15 @@ function collectImports(entry, seen = new Set()) {
   return seen;
 }
 
+test("every sidebar lib import is deployed and shipped", () => {
+  const libImports = [...collectImports("quota-sidebar.tsx")].filter((file) => file.startsWith("lib/"));
+  const deployed = new Set(SIDEBAR_LIB_FILES.map((file) => `lib/${file}`));
+  const shipped = new Set(pkg.files);
+
+  assert.deepEqual(libImports.filter((file) => !deployed.has(file)), [], "sidebar lib imports must be in SIDEBAR_LIB_FILES");
+  assert.deepEqual(libImports.filter((file) => !shipped.has(file)), [], "sidebar lib imports must be in package.json files");
+});
+
 // A file that is imported at runtime but missing from package.json "files"
 // works from a checkout (and from a path-loaded plugin) yet throws
 // ERR_MODULE_NOT_FOUND for every user of the published tarball.
@@ -34,3 +45,20 @@ for (const entry of ["bin/cli.js", "quota-hard-stop.js"]) {
     assert.deepEqual(missing, [], `not shipped in the npm tarball: ${missing.join(", ")}`);
   });
 }
+
+test("warm modules ship with the CLI but stay outside the sidebar bundle", () => {
+  const warmModules = [
+    "lib/claude-warm.js",
+    "lib/warm-schedule.js",
+    "lib/warm-watch.js",
+  ];
+  const shipped = new Set(pkg.files);
+  const sidebarLibs = new Set(SIDEBAR_LIB_FILES.map((file) => `lib/${file}`));
+  const sidebarImports = collectImports("quota-sidebar.tsx");
+  const cliImports = collectImports("bin/cli.js");
+
+  assert.deepEqual(warmModules.filter((file) => !shipped.has(file)), []);
+  assert.deepEqual(warmModules.filter((file) => sidebarLibs.has(file)), []);
+  assert.deepEqual(warmModules.filter((file) => sidebarImports.has(file)), []);
+  assert.deepEqual([...cliImports].filter((file) => !shipped.has(file)), []);
+});
