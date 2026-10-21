@@ -7,3 +7,5 @@ node_modules/
 /opencode.json
 # Local-only: agent guidance, not shipped to the public repo
 /AGENTS.md
+# Local-only: personal roadmap notes, not shipped to the public repo
+/ROADMAP.md

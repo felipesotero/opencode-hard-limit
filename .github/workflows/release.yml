@@ -1,0 +1,63 @@
+name: Release
+
+# Pushing a tag vX.Y.Z creates the GitHub Release with the packed tarball and
+# a SHA-256 checksum attached. Publishing to npm stays a manual step.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check that the tag matches package.json
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $VERSION"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - run: npm test
+
+      - name: Pack tarball and checksum
+        run: |
+          set -euo pipefail
+          TGZ="$(npm pack --silent)"
+          sha256sum "$TGZ" > "$TGZ.sha256"
+          echo "TGZ=$TGZ" >> "$GITHUB_ENV"
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          awk -v v="$VERSION" '/^\[[^]]+\]: /{next} /^## \[/{p=(index($0,"[" v "]")==4); next} p' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::warning::No CHANGELOG.md section for $VERSION; the release will only have generated notes"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FLAGS=()
+          if [[ "$VERSION" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "$TGZ" "$TGZ.sha256" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --generate-notes \
+            "${FLAGS[@]}"

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test
+
+  package:
+    name: Package smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pack, install the tarball in a clean project and use it
+        run: |
+          set -euo pipefail
+          DEST="$(mktemp -d)"
+          TGZ="$(npm pack --silent --pack-destination "$DEST")"
+          cd "$(mktemp -d)"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$DEST/$TGZ"
+          npx --no-install opencode-hard-limit --help
+          node --input-type=module -e "await import('opencode-hard-limit'); await import('opencode-hard-limit/config')"
